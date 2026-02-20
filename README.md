@@ -16,14 +16,13 @@ The Relational-Quantum (RQ) hypothesis is the primary reference use case for RqS
 
 Below is a detailed technical analysis of the RqSimPlatform architecture and the engineering solutions implemented.
 
-<img width="1352" height="893" alt="image" src="https://github.com/user-attachments/assets/453a2a41-d63d-4367-aada-5dfb79699bcd" />
-<img width="1352" height="893" alt="image" src="https://github.com/user-attachments/assets/13a1ab0d-de2d-43ed-a6c5-c3535074dad9" />
-<img width="1352" height="893" alt="image" src="https://github.com/user-attachments/assets/bf071e75-5fab-442e-aa89-dca83c474374" />
-<img width="1352" height="893" alt="image" src="https://github.com/user-attachments/assets/073126d2-c8bf-4f82-b6c7-967117827fde" />
-<img width="1352" height="893" alt="image" src="https://github.com/user-attachments/assets/3705b32b-7f84-4919-ab8c-03d00378c937" />
-<img width="1352" height="893" alt="image" src="https://github.com/user-attachments/assets/aebd9f0d-5d45-4701-aff4-391adf75de28" />
-<img width="1352" height="893" alt="image" src="https://github.com/user-attachments/assets/042bdd30-5568-4a55-a1e7-85393e7e8e53" />
-
+<img width="1352" height="893" alt="image" src="https://github.com/user-attachments/assets/4ebbb310-ea51-47db-a74a-0a18fbf52eb9" />
+<img width="1352" height="893" alt="image" src="https://github.com/user-attachments/assets/b8fe2a77-c040-4276-ac95-766a39c8622b" />
+<img width="1352" height="893" alt="image" src="https://github.com/user-attachments/assets/5acc7edf-18a3-4361-b188-1461df1fd0a6" />
+<img width="1352" height="893" alt="image" src="https://github.com/user-attachments/assets/2717d6bf-1783-4b16-962f-d535d9b15ca5" />
+<img width="1352" height="893" alt="image" src="https://github.com/user-attachments/assets/af8d503d-1d1a-43b2-a58e-ba9efc138bfe" />
+<img width="1352" height="893" alt="image" src="https://github.com/user-attachments/assets/097eb8cd-5072-432e-9cba-7b26f1a45e77" />
+<img width="1352" height="893" alt="image" src="https://github.com/user-attachments/assets/4ee8c518-9630-4fdb-8d77-dbb48117bd34" />
 
 # Core Architecture – Graph as Fundamental Ontology
 
