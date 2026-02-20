@@ -1,0 +1,34 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net10.0-windows10.0.22000.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<UseWindowsForms>true</UseWindowsForms>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<PlatformTarget>x64</PlatformTarget>
+		<EnableWindowsTargeting>true</EnableWindowsTargeting>
+		<SupportedOSPlatformVersion>10.0.22000.0</SupportedOSPlatformVersion>
+		<Platforms>AnyCPU;x64</Platforms>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<None Remove="Docs\docs\InProgress\hardsciencemode.md" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\RqSim.PluginManager.UI\PhysxPluginsForm.csproj" />
+		<ProjectReference Include="..\RqSim3DForm\RqSim3DForm.csproj" />
+		<ProjectReference Include="..\RqSimEngineApi\RqSimEngineApi.csproj" />
+		<ProjectReference Include="..\RqSimGraphEngine\RqSimGraphEngine.csproj" />
+		<ProjectReference Include="..\RqSimPlatform.Contracts\RqSimPlatform.Contracts.csproj" />
+		<ProjectReference Include="..\RqSimVisualization\RqSimVisualization.csproj" />
+		<ProjectReference Include="..\RqSimTelemetryForm\RqSimTelemetryForm.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Compile Update="Forms\PartialForms\UniPipelineForm\Form_Main_UniPipelineState.cs" />
+		<Compile Update="Forms\PartialForms\UniPipelineForm\Form_Main_Pipeline.cs" />
+	</ItemGroup>
+
+</Project>

@@ -1,0 +1,42 @@
+// ============================================================================
+// ORIGINAL FILE: RenderDataTypes.cs
+// Backed up before modernization: Packed Data Structures implementation
+// ============================================================================
+
+using System.Runtime.InteropServices;
+using ComputeSharp;
+
+namespace RQSimulation.GPUOptimized.Rendering;
+
+/// <summary>
+/// GPU-side physics state ready for render mapper.
+/// Physics data uses double precision.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct PhysicsNodeState
+{
+    public double X;
+    public double Y;
+    public double Z;
+    public double PsiReal;
+    public double PsiImag;
+    public double Potential;
+    public double Mass;
+}
+
+/// <summary>
+/// GPU-side render vertex output (float precision).
+/// Layout matches PointVertex used by Veldrid/DX12 renderers.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct RenderNodeVertex
+{
+    public float X;
+    public float Y;
+    public float Z;
+    public float R;
+    public float G;
+    public float B;
+    public float A;
+    public float Size;
+}

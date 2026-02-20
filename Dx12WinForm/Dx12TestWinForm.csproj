@@ -1,0 +1,96 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net10.0-windows</TargetFramework>
+		<Nullable>enable</Nullable>
+		<UseWindowsForms>true</UseWindowsForms>
+		<ImplicitUsings>enable</ImplicitUsings>
+	</PropertyGroup>
+
+
+
+
+
+
+
+
+
+
+
+	<ItemGroup>
+		<PackageReference Include="Arch" Version="2.1.0" />
+
+		<!-- ImGui for immediate mode UI -->
+		<PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+
+		<!-- Legacy drawing panel -->
+		<PackageReference Include="iSukces.DrawingPanel" Version="1.25.1203.52" />
+
+		<!-- SIMD operations (usually included but explicit for clarity) -->
+		<PackageReference Include="System.Numerics.Vectors" Version="4.6.1" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\RqSim.PluginManager.UI\PhysxPluginsForm.csproj" />
+		<ProjectReference Include="..\RqSimEngineApi\RqSimEngineApi.csproj" />
+		<ProjectReference Include="..\RqSimGraphEngine\RqSimGraphEngine.csproj" />
+		<ProjectReference Include="..\RqSimPlatform.Contracts\RqSimPlatform.Contracts.csproj" />
+
+		<!-- Shared abstractions (interfaces) -->
+		<ProjectReference Include="..\RqSimRenderingEngine.Abstractions\RqSimRenderingEngine.Abstractions.csproj" />
+		<ProjectReference Include="..\RqSimRenderingEngine\RqSimRenderingEngine.csproj" />
+
+
+		<!-- DX12 backend as direct reference (primary renderer) -->
+
+		<!-- Veldrid backend loaded as isolated plugin to avoid Vortice DLL conflicts -->
+		<!-- DO NOT add ProjectReference to RqSimRenderVeldrid - it's loaded dynamically -->
+	</ItemGroup>
+
+
+
+
+
+
+
+
+
+
+	<ItemGroup>
+		<PackageReference Include="Arch" Version="2.1.0" />
+
+		<!-- ImGui for immediate mode UI -->
+		<PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+
+		<!-- Legacy drawing panel -->
+		<PackageReference Include="iSukces.DrawingPanel" Version="1.25.1203.52" />
+
+		<!-- SIMD operations (usually included but explicit for clarity) -->
+		<PackageReference Include="System.Numerics.Vectors" Version="4.6.1" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\RqSim.PluginManager.UI\PhysxPluginsForm.csproj" />
+		<ProjectReference Include="..\RqSimEngineApi\RqSimEngineApi.csproj" />
+		<ProjectReference Include="..\RqSimGraphEngine\RqSimGraphEngine.csproj" />
+
+		<!-- Shared abstractions (interfaces) -->
+		<ProjectReference Include="..\RqSimRenderingEngine.Abstractions\RqSimRenderingEngine.Abstractions.csproj" />
+		<ProjectReference Include="..\RqSimRenderingEngine\RqSimRenderingEngine.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Compile Update="Forms\PartialForms3D\Dx12_View.cs">
+			<SubType>Form</SubType>
+		</Compile>
+	</ItemGroup>
+
+
+
+
+
+
+
+
+</Project>

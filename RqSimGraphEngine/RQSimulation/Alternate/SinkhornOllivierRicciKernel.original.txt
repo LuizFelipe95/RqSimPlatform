@@ -1,0 +1,99 @@
+// ============================================================
+// GravityShadersDouble.cs - ORIGINAL VERSION (pre-audit)
+// Archived: Hard Science Mode Audit Fixes
+// ============================================================
+// MaxNeighbors = 32 hardcoded, no adaptive parameter
+// See updated version for adaptive implementation
+// ============================================================
+
+using ComputeSharp;
+
+namespace RQSimulation.GPUOptimized.Gravity;
+
+/// <summary>
+/// SINKHORN-KNOPP OLLIVIER-RICCI CURVATURE - ORIGINAL
+/// MaxNeighbors = 32 hardcoded
+/// </summary>
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+[GeneratedComputeShaderDescriptor]
+[RequiresDoublePrecisionSupport]
+public readonly partial struct SinkhornOllivierRicciKernel_Original : IComputeShader
+{
+    public readonly ReadOnlyBuffer<int> edgesFrom;
+    public readonly ReadOnlyBuffer<int> edgesTo;
+    public readonly ReadOnlyBuffer<double> edgeWeights;
+    public readonly ReadOnlyBuffer<int> csrOffsets;
+    public readonly ReadOnlyBuffer<int> csrNeighbors;
+    public readonly ReadOnlyBuffer<double> csrWeights;
+    public readonly ReadWriteBuffer<double> curvatures;
+    public readonly int edgeCount;
+    public readonly int nodeCount;
+    public readonly int sinkhornIterations;
+    public readonly double epsilon;
+    public readonly double lazyWalkAlpha;
+    
+    // ORIGINAL: Hardcoded maximum neighborhood size
+    private const int MaxNeighbors = 32;
+    
+    public SinkhornOllivierRicciKernel_Original(
+        ReadOnlyBuffer<int> edgesFrom,
+        ReadOnlyBuffer<int> edgesTo,
+        ReadOnlyBuffer<double> edgeWeights,
+        ReadOnlyBuffer<int> csrOffsets,
+        ReadOnlyBuffer<int> csrNeighbors,
+        ReadOnlyBuffer<double> csrWeights,
+        ReadWriteBuffer<double> curvatures,
+        int edgeCount,
+        int nodeCount,
+        int sinkhornIterations,
+        double epsilon,
+        double lazyWalkAlpha = 0.1)
+    {
+        this.edgesFrom = edgesFrom;
+        this.edgesTo = edgesTo;
+        this.edgeWeights = edgeWeights;
+        this.csrOffsets = csrOffsets;
+        this.csrNeighbors = csrNeighbors;
+        this.csrWeights = csrWeights;
+        this.curvatures = curvatures;
+        this.edgeCount = edgeCount;
+        this.nodeCount = nodeCount;
+        this.sinkhornIterations = sinkhornIterations;
+        this.epsilon = epsilon;
+        this.lazyWalkAlpha = lazyWalkAlpha;
+    }
+    
+    public void Execute()
+    {
+        int e = ThreadIds.X;
+        if (e >= edgeCount) return;
+        
+        int u = edgesFrom[e];
+        int v = edgesTo[e];
+        double d_uv = edgeWeights[e];
+        
+        if (d_uv <= 1e-10)
+        {
+            curvatures[e] = 0.0;
+            return;
+        }
+        
+        int startU = csrOffsets[u];
+        int endU = csrOffsets[u + 1];
+        int startV = csrOffsets[v];
+        int endV = csrOffsets[v + 1];
+        
+        // PROBLEM: This truncates to 32 neighbors
+        int degU = Hlsl.Min(endU - startU, MaxNeighbors);
+        int degV = Hlsl.Min(endV - startV, MaxNeighbors);
+        
+        if (degU == 0 || degV == 0)
+        {
+            curvatures[e] = 0.0;
+            return;
+        }
+        
+        // ... rest of original implementation
+        curvatures[e] = 0.0; // Placeholder
+    }
+}

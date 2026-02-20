@@ -1,0 +1,67 @@
+================================================================================
+RQ-HYPOTHESIS STAGE 4: INTERNAL OBSERVER
+================================================================================
+Date: 2024
+Status: IMPLEMENTED
+
+OVERVIEW:
+---------
+This stage introduces relational measurement through an internal observer
+subsystem. Instead of external "God's eye view" measurements, the observer
+is a designated region of the graph that becomes entangled with the system
+being measured.
+
+NEW FILES CREATED:
+------------------
+1. RQSimulation\Quantum\Measurement\InternalObserver.cs
+   - InternalObserver class - core observer implementation
+   - ObservationRecord struct - single measurement record
+   - ObservationStatistics struct - summary statistics
+
+2. RQSimulation\Quantum\Measurement\RQGraph.InternalObserver.cs
+   - Partial class with RQGraph integration methods
+   - GetNodePhase(), ShiftNodePhase(), GetNodeWavefunction()
+   - ConfigureInternalObserver(), GetInternallyObservedEnergy()
+
+3. RqSimGPUCPUTests\Tests\InternalObserver\InternalObserver_Tests.cs
+   - 25 unit tests for the new functionality
+
+EXISTING FILES PRESERVED (NOT MODIFIED):
+----------------------------------------
+- RQSimulation\Analysis\Statistics\RQGraph.Statistics.cs
+  All existing statistics methods remain unchanged.
+  
+- RQSimulation\Quantum\Measurement\RQGraph.Measurement.cs
+  All existing measurement methods remain unchanged.
+
+KEY NEW METHODS IN RQGraph:
+---------------------------
+- ConfigureInternalObserver(nodes, seed) - set up observer subsystem
+- ConfigureInternalObserverAuto(size, seed) - auto-select low-degree nodes
+- DisableInternalObserver() - return to legacy mode
+- GetInternallyObservedEnergy() - RQ-compliant energy measurement
+- GetNodePhase(nodeId) - get wavefunction phase
+- ShiftNodePhase(nodeId, delta) - apply phase rotation
+- GetNodeWavefunction(nodeId) - get wavefunction value
+- GetObserverMutualInformation(targets) - correlation measure
+
+BACKWARD COMPATIBILITY:
+-----------------------
+- _internalObserver = null by default (legacy behavior preserved)
+- All existing statistics methods work without modification
+- GetInternallyObservedEnergy() falls back to ComputeNetworkHamiltonian()
+  when no observer is configured
+
+PHYSICS NOTES:
+--------------
+In relational quantum mechanics, measurement is an interaction that creates
+correlation (entanglement) between observer and system. The "result" is 
+encoded in the relative phase between subsystems, not extracted to external
+classical variables.
+
+This implementation:
+1. Observer nodes form a designated subsystem
+2. Measurement creates phase correlations via ApplyControlledPhase()
+3. Results are "recorded" in observer's phase, not external variables
+4. Mutual information quantifies how much information observer has extracted
+================================================================================

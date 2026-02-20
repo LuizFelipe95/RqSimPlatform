@@ -1,0 +1,204 @@
+// ============================================================================
+// ORIGINAL FILE: Dx12SceneRenderer.cs
+// Backed up before modernization: Vertex Pulling implementation
+// ============================================================================
+
+using System;
+using System.Numerics;
+using Vortice.Direct3D12;
+using Vortice.DXGI;
+
+namespace RqSimRenderingEngine.Rendering.Backend.DX12.Rendering;
+
+/// <summary>
+/// Manages 3D scene rendering with proper draw order for depth testing.
+/// Implements Early-Z optimization by drawing opaque occluders (nodes) before edges.
+/// Supports GPU-driven culling for large edge counts.
+/// </summary>
+internal sealed class Dx12SceneRenderer : IDisposable
+{
+    private readonly SphereRenderer _sphereRenderer = new();
+    private readonly LineRenderer _lineRenderer = new();
+    private readonly GpuEdgeCuller _edgeCuller = new();
+    
+    private ID3D12Device? _device;
+    private bool _initialized;
+    private bool _disposed;
+    
+    // GPU culling settings
+    private bool _gpuCullingEnabled;
+    private float _minProjectedEdgeSize = 0.002f;
+    private Matrix4x4 _lastView;
+    private Matrix4x4 _lastProjection;
+    private Vector3 _cameraPosition;
+
+    public bool GpuCullingEnabled
+    {
+        get => _gpuCullingEnabled;
+        set => _gpuCullingEnabled = value && _edgeCuller.IsAvailable;
+    }
+
+    public float MinProjectedEdgeSize
+    {
+        get => _minProjectedEdgeSize;
+        set => _minProjectedEdgeSize = Math.Max(0.0001f, value);
+    }
+
+    public void Initialize(
+        ID3D12Device device,
+        Format renderTargetFormat,
+        Format depthFormat,
+        SampleDescription sampleDescription)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        
+        _device = device;
+        
+        _sphereRenderer.Initialize(device, renderTargetFormat, depthFormat, sampleDescription);
+        _lineRenderer.Initialize(device, renderTargetFormat, depthFormat, sampleDescription);
+        
+        InitializeGpuCullingOptional(device);
+        
+        _initialized = true;
+    }
+
+    private void InitializeGpuCullingOptional(ID3D12Device device)
+    {
+        try
+        {
+            _edgeCuller.Initialize(device);
+            System.Diagnostics.Debug.WriteLine("[SceneRenderer] GPU edge culling available");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SceneRenderer] GPU culling unavailable (will use direct draw): {ex.Message}");
+            _gpuCullingEnabled = false;
+        }
+    }
+
+    public void EnsureCapacity(int maxNodes, int maxEdgeVertices)
+    {
+        if (_device is null || !_initialized)
+            return;
+            
+        _sphereRenderer.EnsureInstanceCapacity(_device, maxNodes);
+        _lineRenderer.EnsureVertexCapacity(_device, maxEdgeVertices);
+        
+        if (_gpuCullingEnabled && _edgeCuller.IsAvailable)
+        {
+            _edgeCuller.EnsureCapacity(_device, maxEdgeVertices / 2);
+        }
+    }
+
+    public void SetCameraMatrices(in Matrix4x4 view, in Matrix4x4 projection)
+    {
+        _lastView = view;
+        _lastProjection = projection;
+        
+        if (Matrix4x4.Invert(view, out var invView))
+        {
+            _cameraPosition = new Vector3(invView.M41, invView.M42, invView.M43);
+        }
+        
+        _sphereRenderer.SetCameraMatrices(view, projection);
+        _lineRenderer.SetCameraMatrices(view, projection);
+    }
+
+    public void UpdateNodeInstances(ReadOnlySpan<Dx12NodeInstance> instances)
+    {
+        _sphereRenderer.UpdateInstances(instances);
+    }
+
+    public void UpdateEdgeVertices(ReadOnlySpan<Dx12LineVertex> vertices)
+    {
+        _lineRenderer.UpdateVertices(vertices);
+        
+        if (_gpuCullingEnabled && _edgeCuller.IsAvailable)
+        {
+            _edgeCuller.UploadEdges(vertices);
+        }
+    }
+
+    public void Render(
+        ID3D12GraphicsCommandList commandList,
+        int nodeCount,
+        int edgeVertexCount)
+    {
+        if (!_initialized || _device is null)
+            return;
+
+        if (nodeCount > 0)
+        {
+            _sphereRenderer.EnsureMeshUploaded(commandList);
+            _sphereRenderer.Draw(commandList, nodeCount);
+        }
+
+        if (edgeVertexCount >= 2)
+        {
+            RenderEdges(commandList, edgeVertexCount);
+        }
+    }
+
+    private void RenderEdges(ID3D12GraphicsCommandList commandList, int edgeVertexCount)
+    {
+        int edgeCount = edgeVertexCount / 2;
+        
+        if (_gpuCullingEnabled && _edgeCuller.IsAvailable && edgeCount >= 1000)
+        {
+            RenderEdgesWithGpuCulling(commandList, edgeCount);
+        }
+        else
+        {
+            _lineRenderer.Draw(commandList, edgeVertexCount);
+        }
+    }
+
+    private void RenderEdgesWithGpuCulling(ID3D12GraphicsCommandList commandList, int edgeCount)
+    {
+        var cullConstants = CullingConstants.Create(
+            _lastView, 
+            _lastProjection, 
+            _cameraPosition, 
+            _minProjectedEdgeSize);
+        cullConstants.TotalEdgeCount = (uint)edgeCount;
+        _edgeCuller.UpdateCullingConstants(cullConstants);
+
+        if (!_edgeCuller.ExecuteCulling(commandList, edgeCount))
+        {
+            _lineRenderer.Draw(commandList, edgeCount * 2);
+            return;
+        }
+
+        var visibleBuffer = _edgeCuller.GetVisibleEdgesBuffer();
+        var indirectArgs = _edgeCuller.GetIndirectArgsBuffer();
+        var cmdSignature = _edgeCuller.GetDrawCommandSignature();
+
+        if (visibleBuffer is null || indirectArgs is null || cmdSignature is null)
+        {
+            _lineRenderer.Draw(commandList, edgeCount * 2);
+            return;
+        }
+
+        _lineRenderer.DrawIndirect(
+            commandList,
+            visibleBuffer,
+            _edgeCuller.GetVisibleEdgesVBView(),
+            indirectArgs,
+            cmdSignature);
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+            
+        _disposed = true;
+        _initialized = false;
+        
+        _edgeCuller.Dispose();
+        _sphereRenderer.Dispose();
+        _lineRenderer.Dispose();
+        
+        _device = null;
+    }
+}

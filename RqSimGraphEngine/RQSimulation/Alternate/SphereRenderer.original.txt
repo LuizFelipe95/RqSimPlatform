@@ -1,0 +1,152 @@
+// ============================================================================
+// ORIGINAL FILE: SphereRenderer.cs
+// Backed up before modernization: Occlusion Culling implementation
+// ============================================================================
+
+using System;
+using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using Vortice.Direct3D;
+using Vortice.Direct3D12;
+using Vortice.D3DCompiler;
+using Vortice.DXGI;
+
+namespace RqSimRenderingEngine.Rendering.Backend.DX12.Rendering;
+
+internal sealed class SphereRenderer : IDisposable
+{
+    private ID3D12Device? _device;
+
+    private ID3D12RootSignature? _rootSignature;
+    private ID3D12PipelineState? _pso;
+
+    private ID3D12Resource? _vertexBuffer;
+    private ID3D12Resource? _indexBuffer;
+    private ID3D12Resource? _instanceBuffer;
+    private int _maxInstances;
+
+    private VertexBufferView _vbView;
+    private IndexBufferView _ibView;
+    private VertexBufferView _instanceView;
+
+    private ID3D12Resource? _cameraConstantBuffer;
+    private IntPtr _cameraCbvPtr;
+
+    private uint _indexCount;
+
+    private bool _disposed;
+
+    private Dx12VertexPositionNormal[]? _uploadedVertices;
+    private ushort[]? _uploadedIndices;
+    private bool _meshUploaded;
+    private ID3D12Resource? _meshUploadVertex;
+    private ID3D12Resource? _meshUploadIndex;
+
+    internal void Initialize(ID3D12Device device, Format renderTargetFormat, Format depthFormat, SampleDescription sampleDescription)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+
+        Dispose();
+        _disposed = false;
+
+        _device = device;
+
+        CreateRootSignature(device);
+        CreatePipeline(device, renderTargetFormat, depthFormat, sampleDescription);
+        CreateMeshBuffers(device);
+        CreateCameraConstantBuffer(device);
+    }
+
+    internal void EnsureInstanceCapacity(ID3D12Device device, int maxInstances)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+
+        maxInstances = Math.Max(maxInstances, 1);
+        if (_instanceBuffer is not null && maxInstances <= _maxInstances)
+            return;
+
+        _instanceBuffer?.Dispose();
+        _instanceBuffer = null;
+
+        _maxInstances = maxInstances;
+
+        ulong sizeInBytes = (ulong)(_maxInstances * Unsafe.SizeOf<Dx12NodeInstance>());
+        _instanceBuffer = device.CreateCommittedResource(
+            new HeapProperties(HeapType.Upload),
+            HeapFlags.None,
+            ResourceDescription.Buffer(sizeInBytes),
+            ResourceStates.GenericRead);
+
+        _instanceView = new VertexBufferView
+        {
+            BufferLocation = _instanceBuffer.GPUVirtualAddress,
+            SizeInBytes = (uint)sizeInBytes,
+            StrideInBytes = (uint)Unsafe.SizeOf<Dx12NodeInstance>()
+        };
+    }
+
+    internal unsafe void UpdateInstances(ReadOnlySpan<Dx12NodeInstance> instances)
+    {
+        if (_instanceBuffer is null || instances.Length == 0)
+            return;
+
+        void* mapped;
+        _instanceBuffer.Map(0, null, &mapped);
+        instances.CopyTo(new Span<Dx12NodeInstance>(mapped, instances.Length));
+        _instanceBuffer.Unmap(0);
+    }
+
+    internal void SetCameraMatrices(in Matrix4x4 view, in Matrix4x4 projection)
+    {
+        if (_cameraCbvPtr == IntPtr.Zero)
+            return;
+
+        CameraConstants data = new(view, projection);
+        Marshal.StructureToPtr(data, _cameraCbvPtr, fDeleteOld: false);
+    }
+
+    internal void EnsureMeshUploaded(ID3D12GraphicsCommandList commandList)
+    {
+        if (_meshUploaded || _device is null || _vertexBuffer is null || _indexBuffer is null)
+            return;
+
+        if (_uploadedVertices is null || _uploadedIndices is null)
+            throw new InvalidOperationException("Mesh data not prepared.");
+
+        Dx12UploadHelper.UploadBuffer(_device, commandList, _uploadedVertices, _vertexBuffer, out _meshUploadVertex);
+        Dx12UploadHelper.UploadBuffer(_device, commandList, _uploadedIndices, _indexBuffer, out _meshUploadIndex);
+
+        commandList.ResourceBarrierTransition(_vertexBuffer, ResourceStates.CopyDest, ResourceStates.VertexAndConstantBuffer);
+        commandList.ResourceBarrierTransition(_indexBuffer, ResourceStates.CopyDest, ResourceStates.IndexBuffer);
+
+        _meshUploaded = true;
+    }
+
+    internal void Draw(ID3D12GraphicsCommandList commandList, int instanceCount)
+    {
+        if (instanceCount <= 0 || _pso is null || _rootSignature is null || _cameraConstantBuffer is null)
+            return;
+
+        commandList.SetPipelineState(_pso);
+        commandList.SetGraphicsRootSignature(_rootSignature);
+
+        commandList.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+
+        unsafe
+        {
+            VertexBufferView* views = stackalloc VertexBufferView[2];
+            views[0] = _vbView;
+            views[1] = _instanceView;
+            commandList.IASetVertexBuffers(0, 2, views);
+        }
+
+        commandList.IASetIndexBuffer(_ibView);
+        commandList.SetGraphicsRootConstantBufferView(0, _cameraConstantBuffer.GPUVirtualAddress);
+
+        commandList.DrawIndexedInstanced(_indexCount, (uint)instanceCount, 0, 0, 0);
+    }
+
+    // ... CreateRootSignature, CreatePipeline, CreateMeshBuffers, CreateCameraConstantBuffer, Dispose ...
+    // (Full implementation preserved in original file)
+}

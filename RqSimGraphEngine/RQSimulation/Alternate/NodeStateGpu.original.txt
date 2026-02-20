@@ -1,0 +1,260 @@
+// BACKUP: Original NodeStateGpu.cs before RQG-HYPOTHESIS migration
+// Date: Migration to Waveform Evolution paradigm
+// Changes: Added Lapse, HamiltonianVal, Phase fields for relational time
+
+using System.Runtime.InteropServices;
+using ComputeSharp;
+
+namespace RQSimulation.GPUCompressedSparseRow.Data;
+
+/// <summary>
+/// GPU-compatible node state for quantum simulation.
+/// Contains wavefunction and potential per node.
+/// 
+/// Memory layout is optimized for coalesced GPU access.
+/// All fields are blittable for direct GPU buffer transfer.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct NodeStateGpu
+{
+    /// <summary>
+    /// Complex wavefunction value at this node.
+    /// Stored as Double2(Real, Imaginary).
+    /// </summary>
+    public readonly Double2 WaveFunction;
+
+    /// <summary>
+    /// Local potential V(x) at this node.
+    /// </summary>
+    public readonly double Potential;
+
+    /// <summary>
+    /// Padding to ensure 8-byte alignment for GPU access.
+    /// </summary>
+    private readonly double _padding;
+
+    public NodeStateGpu(Double2 waveFunction, double potential)
+    {
+        WaveFunction = waveFunction;
+        Potential = potential;
+        _padding = 0;
+    }
+
+    public NodeStateGpu(double psiReal, double psiImag, double potential)
+    {
+        WaveFunction = new Double2(psiReal, psiImag);
+        Potential = potential;
+        _padding = 0;
+    }
+
+    public static NodeStateGpu Zero => new(Double2.Zero, 0);
+}
+
+/// <summary>
+/// Float precision version for GPUs without double support.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct NodeStateGpuFloat
+{
+    public readonly Float2 WaveFunction;
+    public readonly float Potential;
+    private readonly float _padding;
+
+    public NodeStateGpuFloat(Float2 waveFunction, float potential)
+    {
+        WaveFunction = waveFunction;
+        Potential = potential;
+        _padding = 0;
+    }
+}
+
+/// <summary>
+/// Extended node state including gauge field components.
+/// For Yang-Mills coupled evolution.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct NodeStateGaugeGpu
+{
+    /// <summary>
+    /// Complex wavefunction value at this node.
+    /// </summary>
+    public readonly Double2 WaveFunction;
+
+    /// <summary>
+    /// Local potential V(x) at this node.
+    /// </summary>
+    public readonly double Potential;
+
+    /// <summary>
+    /// Local mass term m(x).
+    /// </summary>
+    public readonly double Mass;
+
+    /// <summary>
+    /// Color charge for gauge coupling (SU(N)).
+    /// </summary>
+    public readonly double ColorCharge;
+
+    /// <summary>
+    /// Node degree (number of neighbors) for Laplacian normalization.
+    /// </summary>
+    public readonly int Degree;
+
+    /// <summary>
+    /// Padding for alignment.
+    /// </summary>
+    private readonly int _padding;
+
+    public NodeStateGaugeGpu(
+        Double2 waveFunction,
+        double potential,
+        double mass,
+        double colorCharge,
+        int degree)
+    {
+        WaveFunction = waveFunction;
+        Potential = potential;
+        Mass = mass;
+        ColorCharge = colorCharge;
+        Degree = degree;
+        _padding = 0;
+    }
+}
+
+/// <summary>
+/// Spinor state for Dirac equation on graph.
+/// Four-component spinor stored as two Double2 pairs.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct SpinorStateGpu
+{
+    /// <summary>
+    /// Upper two components of 4-spinor (positive energy).
+    /// </summary>
+    public readonly Double2 Upper0;
+    public readonly Double2 Upper1;
+
+    /// <summary>
+    /// Lower two components of 4-spinor (negative energy).
+    /// </summary>
+    public readonly Double2 Lower0;
+    public readonly Double2 Lower1;
+
+    public SpinorStateGpu(Double2 u0, Double2 u1, Double2 l0, Double2 l1)
+    {
+        Upper0 = u0;
+        Upper1 = u1;
+        Lower0 = l0;
+        Lower1 = l1;
+    }
+
+    public static SpinorStateGpu Zero => new(Double2.Zero, Double2.Zero, Double2.Zero, Double2.Zero);
+}
+
+/// <summary>
+/// Klein-Gordon field state for scalar field evolution.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public readonly struct KleinGordonStateGpu
+{
+    /// <summary>
+    /// Current field value phi(x,t).
+    /// </summary>
+    public readonly double Phi;
+
+    /// <summary>
+    /// Previous field value phi(x,t-dt) for Verlet integration.
+    /// </summary>
+    public readonly double PhiPrev;
+
+    /// <summary>
+    /// Field mass m.
+    /// </summary>
+    public readonly double Mass;
+
+    /// <summary>
+    /// Padding for alignment.
+    /// </summary>
+    private readonly double _padding;
+
+    public KleinGordonStateGpu(double phi, double phiPrev, double mass)
+    {
+        Phi = phi;
+        PhiPrev = phiPrev;
+        Mass = mass;
+        _padding = 0;
+    }
+}
+
+/// <summary>
+/// Buffer pair for ping-pong double buffering.
+/// Avoids memory copies by swapping references.
+/// </summary>
+/// <typeparam name="T">Element type (must be unmanaged for GPU)</typeparam>
+public sealed class PingPongBuffer<T> : IDisposable where T : unmanaged
+{
+    private ReadWriteBuffer<T>? _bufferA;
+    private ReadWriteBuffer<T>? _bufferB;
+    private bool _aIsCurrent;
+    private bool _disposed;
+
+    public int Length { get; private set; }
+
+    public ReadWriteBuffer<T> Current => _aIsCurrent ? _bufferA! : _bufferB!;
+    public ReadWriteBuffer<T> Next => _aIsCurrent ? _bufferB! : _bufferA!;
+
+    public void Allocate(GraphicsDevice device, int length)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        
+        Dispose();
+        
+        Length = length;
+        _bufferA = device.AllocateReadWriteBuffer<T>(length);
+        _bufferB = device.AllocateReadWriteBuffer<T>(length);
+        _aIsCurrent = true;
+        _disposed = false;
+    }
+
+    /// <summary>
+    /// Swap current and next buffers (no memory copy).
+    /// </summary>
+    public void Swap()
+    {
+        _aIsCurrent = !_aIsCurrent;
+    }
+
+    /// <summary>
+    /// Copy data to current buffer.
+    /// </summary>
+    public void UploadToCurrent(ReadOnlySpan<T> data)
+    {
+        if (data.Length != Length)
+            throw new ArgumentException($"Data length {data.Length} != buffer length {Length}");
+        
+        Current.CopyFrom(data);
+    }
+
+    /// <summary>
+    /// Copy data from current buffer.
+    /// </summary>
+    public void DownloadFromCurrent(Span<T> destination)
+    {
+        if (destination.Length != Length)
+            throw new ArgumentException($"Destination length {destination.Length} != buffer length {Length}");
+        
+        Current.CopyTo(destination);
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+
+        _bufferA?.Dispose();
+        _bufferB?.Dispose();
+        _bufferA = null;
+        _bufferB = null;
+        _disposed = true;
+    }
+}

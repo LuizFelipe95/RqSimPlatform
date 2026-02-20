@@ -1,0 +1,435 @@
+﻿using ComputeSharp;
+
+namespace RQSimulation.GPUOptimized.Topology;
+
+/// <summary>
+/// RQG-HYPOTHESIS: Potential Link Activator
+/// 
+/// Manages activation of "sleeping" edges (weight ? 0).
+/// 
+/// PHYSICS:
+/// When spectral gap requires topology change for energy minimization,
+/// edges with near-zero weight can be "activated" (weight increased).
+/// 
+/// This replaces random edge creation with deterministic activation
+/// based on energy/spectral criteria.
+/// 
+/// ACTIVATION CRITERIA:
+/// 1. Spectral gap too large ? activate edges to increase connectivity
+/// 2. Local energy imbalance ? activate edges to redistribute
+/// 3. Constraint violation ? activate edges to satisfy Wheeler-DeWitt
+/// 
+/// STOP-LIST COMPLIANCE:
+/// ? NO edge creation in CSR arrays (expensive rebuild)
+/// ? Activate existing "sleeping" edges by increasing weight
+/// </summary>
+
+/// <summary>
+/// Compute activation potential for sleeping edges.
+/// Higher potential ? more likely to be activated.
+/// </summary>
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+[GeneratedComputeShaderDescriptor]
+[RequiresDoublePrecisionSupport]
+public readonly partial struct ActivationPotentialShaderDouble : IComputeShader
+{
+    /// <summary>Current edge weights</summary>
+    public readonly ReadOnlyBuffer<double> edgeWeights;
+    
+    /// <summary>Node energies (for energy-based activation)</summary>
+    public readonly ReadOnlyBuffer<double> nodeEnergies;
+    
+    /// <summary>Edge source nodes</summary>
+    public readonly ReadOnlyBuffer<int> edgeSrc;
+    
+    /// <summary>Edge destination nodes</summary>
+    public readonly ReadOnlyBuffer<int> edgeDst;
+    
+    /// <summary>Hamiltonian constraint violations at nodes</summary>
+    public readonly ReadOnlyBuffer<double> hamiltonianViolations;
+    
+    /// <summary>Output: Activation potential for each edge</summary>
+    public readonly ReadWriteBuffer<double> activationPotential;
+    
+    /// <summary>Weight threshold for "sleeping" edge</summary>
+    public readonly double sleepThreshold;
+    
+    /// <summary>Number of edges</summary>
+    public readonly int edgeCount;
+    
+    public ActivationPotentialShaderDouble(
+        ReadOnlyBuffer<double> edgeWeights,
+        ReadOnlyBuffer<double> nodeEnergies,
+        ReadOnlyBuffer<int> edgeSrc,
+        ReadOnlyBuffer<int> edgeDst,
+        ReadOnlyBuffer<double> hamiltonianViolations,
+        ReadWriteBuffer<double> activationPotential,
+        double sleepThreshold,
+        int edgeCount)
+    {
+        this.edgeWeights = edgeWeights;
+        this.nodeEnergies = nodeEnergies;
+        this.edgeSrc = edgeSrc;
+        this.edgeDst = edgeDst;
+        this.hamiltonianViolations = hamiltonianViolations;
+        this.activationPotential = activationPotential;
+        this.sleepThreshold = sleepThreshold;
+        this.edgeCount = edgeCount;
+    }
+    
+    public void Execute()
+    {
+        int e = ThreadIds.X;
+        if (e >= edgeCount) return;
+        
+        double w = edgeWeights[e];
+        
+        // Only compute potential for sleeping edges
+        if (w > sleepThreshold)
+        {
+            activationPotential[e] = 0.0;
+            return;
+        }
+        
+        int src = edgeSrc[e];
+        int dst = edgeDst[e];
+        
+        double E_src = nodeEnergies[src];
+        double E_dst = nodeEnergies[dst];
+        double H_src = hamiltonianViolations[src];
+        double H_dst = hamiltonianViolations[dst];
+        
+        // Activation potential based on:
+        // 1. Energy imbalance between endpoints (drives flow)
+        // 2. Constraint violations (need connectivity to satisfy)
+        double energyImbalance = (E_src - E_dst) * (E_src - E_dst);
+        double constraintNeed = (H_src * H_src + H_dst * H_dst) * 0.5;
+        
+        // Higher potential = more beneficial to activate
+        activationPotential[e] = energyImbalance + constraintNeed;
+    }
+}
+
+/// <summary>
+/// Activate sleeping edges based on activation potential.
+/// Edges with highest potential get activated first.
+/// </summary>
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+[GeneratedComputeShaderDescriptor]
+[RequiresDoublePrecisionSupport]
+public readonly partial struct ActivateSleepingEdgesShaderDouble : IComputeShader
+{
+    /// <summary>Edge weights (input/output)</summary>
+    public readonly ReadWriteBuffer<double> edgeWeights;
+    
+    /// <summary>Activation potential for each edge</summary>
+    public readonly ReadOnlyBuffer<double> activationPotential;
+    
+    /// <summary>Threshold potential for activation</summary>
+    public readonly double potentialThreshold;
+    
+    /// <summary>Weight to assign activated edges</summary>
+    public readonly double activationWeight;
+    
+    /// <summary>Sleep threshold</summary>
+    public readonly double sleepThreshold;
+    
+    /// <summary>Number of edges</summary>
+    public readonly int edgeCount;
+    
+    public ActivateSleepingEdgesShaderDouble(
+        ReadWriteBuffer<double> edgeWeights,
+        ReadOnlyBuffer<double> activationPotential,
+        double potentialThreshold,
+        double activationWeight,
+        double sleepThreshold,
+        int edgeCount)
+    {
+        this.edgeWeights = edgeWeights;
+        this.activationPotential = activationPotential;
+        this.potentialThreshold = potentialThreshold;
+        this.activationWeight = activationWeight;
+        this.sleepThreshold = sleepThreshold;
+        this.edgeCount = edgeCount;
+    }
+    
+    public void Execute()
+    {
+        int e = ThreadIds.X;
+        if (e >= edgeCount) return;
+        
+        double w = edgeWeights[e];
+        
+        // Only consider sleeping edges
+        if (w > sleepThreshold) return;
+        
+        double potential = activationPotential[e];
+        
+        // Activate if potential exceeds threshold
+        if (potential > potentialThreshold)
+        {
+            edgeWeights[e] = activationWeight;
+        }
+    }
+}
+
+/// <summary>
+/// Spectral-gap based activation controller.
+/// Activates edges when spectral gap is too large (poor connectivity).
+/// </summary>
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+[GeneratedComputeShaderDescriptor]
+[RequiresDoublePrecisionSupport]
+public readonly partial struct SpectralGapActivationShaderDouble : IComputeShader
+{
+    /// <summary>Edge weights (input/output)</summary>
+    public readonly ReadWriteBuffer<double> edgeWeights;
+    
+    /// <summary>Node degrees</summary>
+    public readonly ReadOnlyBuffer<int> nodeDegrees;
+    
+    /// <summary>Edge source nodes</summary>
+    public readonly ReadOnlyBuffer<int> edgeSrc;
+    
+    /// <summary>Edge destination nodes</summary>
+    public readonly ReadOnlyBuffer<int> edgeDst;
+    
+    /// <summary>Current spectral gap (precomputed)</summary>
+    public readonly double spectralGap;
+    
+    /// <summary>Target spectral gap</summary>
+    public readonly double targetGap;
+    
+    /// <summary>Sleep threshold</summary>
+    public readonly double sleepThreshold;
+    
+    /// <summary>Activation weight</summary>
+    public readonly double activationWeight;
+    
+    /// <summary>Number of edges</summary>
+    public readonly int edgeCount;
+    
+    public SpectralGapActivationShaderDouble(
+        ReadWriteBuffer<double> edgeWeights,
+        ReadOnlyBuffer<int> nodeDegrees,
+        ReadOnlyBuffer<int> edgeSrc,
+        ReadOnlyBuffer<int> edgeDst,
+        double spectralGap,
+        double targetGap,
+        double sleepThreshold,
+        double activationWeight,
+        int edgeCount)
+    {
+        this.edgeWeights = edgeWeights;
+        this.nodeDegrees = nodeDegrees;
+        this.edgeSrc = edgeSrc;
+        this.edgeDst = edgeDst;
+        this.spectralGap = spectralGap;
+        this.targetGap = targetGap;
+        this.sleepThreshold = sleepThreshold;
+        this.activationWeight = activationWeight;
+        this.edgeCount = edgeCount;
+    }
+    
+    public void Execute()
+    {
+        int e = ThreadIds.X;
+        if (e >= edgeCount) return;
+        
+        // Only activate if spectral gap is too large
+        if (spectralGap <= targetGap) return;
+        
+        double w = edgeWeights[e];
+        if (w > sleepThreshold) return; // Already active
+        
+        int src = edgeSrc[e];
+        int dst = edgeDst[e];
+        
+        int degSrc = nodeDegrees[src];
+        int degDst = nodeDegrees[dst];
+        
+        // Prioritize activating edges between low-degree nodes
+        // (improves connectivity where it's needed most)
+        int minDeg = degSrc < degDst ? degSrc : degDst;
+        
+        // Simple heuristic: activate edges at low-degree nodes
+        if (minDeg < 3) // Less than 3 connections
+        {
+            edgeWeights[e] = activationWeight;
+        }
+    }
+}
+
+/// <summary>
+/// Deactivate edges based on Ricci flow or energy criteria.
+/// Sets weight to minimum (sleep) value instead of deleting.
+/// </summary>
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+[GeneratedComputeShaderDescriptor]
+[RequiresDoublePrecisionSupport]
+public readonly partial struct DeactivateEdgesShaderDouble : IComputeShader
+{
+    /// <summary>Edge weights (input/output)</summary>
+    public readonly ReadWriteBuffer<double> edgeWeights;
+    
+    /// <summary>Deactivation flags (1 = deactivate)</summary>
+    public readonly ReadOnlyBuffer<int> shouldDeactivate;
+    
+    /// <summary>Sleep weight value</summary>
+    public readonly double sleepWeight;
+    
+    /// <summary>Number of edges</summary>
+    public readonly int edgeCount;
+    
+    public DeactivateEdgesShaderDouble(
+        ReadWriteBuffer<double> edgeWeights,
+        ReadOnlyBuffer<int> shouldDeactivate,
+        double sleepWeight,
+        int edgeCount)
+    {
+        this.edgeWeights = edgeWeights;
+        this.shouldDeactivate = shouldDeactivate;
+        this.sleepWeight = sleepWeight;
+        this.edgeCount = edgeCount;
+    }
+    
+    public void Execute()
+    {
+        int e = ThreadIds.X;
+        if (e >= edgeCount) return;
+        
+        if (shouldDeactivate[e] == 1)
+        {
+            edgeWeights[e] = sleepWeight;
+        }
+    }
+}
+
+/// <summary>
+/// Count active edges (weight > threshold).
+/// Uses parallel reduction pattern.
+/// </summary>
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+[GeneratedComputeShaderDescriptor]
+[RequiresDoublePrecisionSupport]
+public readonly partial struct CountActiveEdgesShaderDouble : IComputeShader
+{
+    /// <summary>Edge weights</summary>
+    public readonly ReadOnlyBuffer<double> edgeWeights;
+    
+    /// <summary>Output: 1 if active, 0 if sleeping</summary>
+    public readonly ReadWriteBuffer<int> isActive;
+    
+    /// <summary>Sleep threshold</summary>
+    public readonly double sleepThreshold;
+    
+    /// <summary>Number of edges</summary>
+    public readonly int edgeCount;
+    
+    public CountActiveEdgesShaderDouble(
+        ReadOnlyBuffer<double> edgeWeights,
+        ReadWriteBuffer<int> isActive,
+        double sleepThreshold,
+        int edgeCount)
+    {
+        this.edgeWeights = edgeWeights;
+        this.isActive = isActive;
+        this.sleepThreshold = sleepThreshold;
+        this.edgeCount = edgeCount;
+    }
+    
+    public void Execute()
+    {
+        int e = ThreadIds.X;
+        if (e >= edgeCount) return;
+        
+        isActive[e] = edgeWeights[e] > sleepThreshold ? 1 : 0;
+    }
+}
+
+/// <summary>
+/// Energy-balanced activation: activate edges to balance local energy.
+/// </summary>
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+[GeneratedComputeShaderDescriptor]
+[RequiresDoublePrecisionSupport]
+public readonly partial struct EnergyBalancedActivationShaderDouble : IComputeShader
+{
+    /// <summary>Edge weights (input/output)</summary>
+    public readonly ReadWriteBuffer<double> edgeWeights;
+    
+    /// <summary>Node energies</summary>
+    public readonly ReadOnlyBuffer<double> nodeEnergies;
+    
+    /// <summary>Average node energy (precomputed)</summary>
+    public readonly double avgEnergy;
+    
+    /// <summary>Edge source nodes</summary>
+    public readonly ReadOnlyBuffer<int> edgeSrc;
+    
+    /// <summary>Edge destination nodes</summary>
+    public readonly ReadOnlyBuffer<int> edgeDst;
+    
+    /// <summary>Sleep threshold</summary>
+    public readonly double sleepThreshold;
+    
+    /// <summary>Activation weight</summary>
+    public readonly double activationWeight;
+    
+    /// <summary>Energy imbalance threshold</summary>
+    public readonly double imbalanceThreshold;
+    
+    /// <summary>Number of edges</summary>
+    public readonly int edgeCount;
+    
+    public EnergyBalancedActivationShaderDouble(
+        ReadWriteBuffer<double> edgeWeights,
+        ReadOnlyBuffer<double> nodeEnergies,
+        double avgEnergy,
+        ReadOnlyBuffer<int> edgeSrc,
+        ReadOnlyBuffer<int> edgeDst,
+        double sleepThreshold,
+        double activationWeight,
+        double imbalanceThreshold,
+        int edgeCount)
+    {
+        this.edgeWeights = edgeWeights;
+        this.nodeEnergies = nodeEnergies;
+        this.avgEnergy = avgEnergy;
+        this.edgeSrc = edgeSrc;
+        this.edgeDst = edgeDst;
+        this.sleepThreshold = sleepThreshold;
+        this.activationWeight = activationWeight;
+        this.imbalanceThreshold = imbalanceThreshold;
+        this.edgeCount = edgeCount;
+    }
+    
+    public void Execute()
+    {
+        int e = ThreadIds.X;
+        if (e >= edgeCount) return;
+        
+        double w = edgeWeights[e];
+        if (w > sleepThreshold) return; // Already active
+        
+        int src = edgeSrc[e];
+        int dst = edgeDst[e];
+        
+        double E_src = nodeEnergies[src];
+        double E_dst = nodeEnergies[dst];
+        
+        // Check if endpoints have opposing energy imbalances
+        double dev_src = E_src - avgEnergy;
+        double dev_dst = E_dst - avgEnergy;
+        
+        // Activate if one is high and other is low (will help balance)
+        if (dev_src * dev_dst < 0) // Opposite signs
+        {
+            double imbalance = (dev_src - dev_dst) * (dev_src - dev_dst);
+            if (imbalance > imbalanceThreshold)
+            {
+                edgeWeights[e] = activationWeight;
+            }
+        }
+    }
+}

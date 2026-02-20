@@ -1,0 +1,190 @@
+// ============================================================================
+// ORIGINAL FILE: RenderDataMapper.cs
+// Backed up before modernization: Packed Data Structures implementation
+// ============================================================================
+
+using System;
+using ComputeSharp;
+
+namespace RQSimulation.GPUOptimized.Rendering;
+
+/// <summary>
+/// Manages GPU-accelerated physics->render data conversion.
+/// Provides both GPU and CPU fallback paths.
+/// </summary>
+public sealed class RenderDataMapper : IDisposable
+{
+    private ReadOnlyBuffer<PhysicsNodeState>? _physicsBuffer;
+    private ReadWriteBuffer<RenderNodeVertex>? _vertexBuffer;
+    private int _capacity;
+    private bool _disposed;
+
+    /// <summary>
+    /// Whether GPU double precision is supported.
+    /// </summary>
+    public bool IsDoublePrecisionSupported { get; private set; }
+
+    /// <summary>
+    /// Current capacity (max nodes).
+    /// </summary>
+    public int Capacity => _capacity;
+
+    /// <summary>
+    /// Initialize GPU buffers.
+    /// </summary>
+    /// <param name="maxNodes">Maximum number of nodes to process</param>
+    public void Initialize(int maxNodes)
+    {
+        Dispose();
+        _disposed = false;
+
+        _capacity = maxNodes;
+
+        try
+        {
+            // Check device capabilities
+            IsDoublePrecisionSupported = GraphicsDevice.GetDefault().IsDoublePrecisionSupportAvailable();
+
+            _physicsBuffer = GraphicsDevice.GetDefault().AllocateReadOnlyBuffer<PhysicsNodeState>(maxNodes);
+            _vertexBuffer = GraphicsDevice.GetDefault().AllocateReadWriteBuffer<RenderNodeVertex>(maxNodes);
+        }
+        catch (Exception)
+        {
+            IsDoublePrecisionSupported = false;
+            _physicsBuffer = null;
+            _vertexBuffer = null;
+        }
+    }
+
+    /// <summary>
+    /// Map physics data to render vertices on GPU.
+    /// Falls back to CPU if GPU unavailable.
+    /// </summary>
+    /// <param name="physics">Source physics data (CPU memory)</param>
+    /// <param name="vertices">Destination vertex data (CPU memory)</param>
+    /// <param name="colorMode">0=Phase, 1=Energy, 2=Mass</param>
+    /// <param name="baseSize">Base vertex size</param>
+    /// <param name="sizeScale">Size scaling factor for probability</param>
+    public void Map(
+        ReadOnlySpan<PhysicsNodeState> physics,
+        Span<RenderNodeVertex> vertices,
+        int colorMode = 0,
+        float baseSize = 0.5f,
+        float sizeScale = 2f)
+    {
+        int count = Math.Min(physics.Length, vertices.Length);
+        count = Math.Min(count, _capacity);
+
+        if (_physicsBuffer is not null && _vertexBuffer is not null && IsDoublePrecisionSupported)
+        {
+            MapOnGpu(physics[..count], vertices[..count], colorMode, baseSize, sizeScale);
+        }
+        else
+        {
+            MapOnCpu(physics[..count], vertices[..count], colorMode, baseSize, sizeScale);
+        }
+    }
+
+    private void MapOnGpu(
+        ReadOnlySpan<PhysicsNodeState> physics,
+        Span<RenderNodeVertex> vertices,
+        int colorMode,
+        float baseSize,
+        float sizeScale)
+    {
+        int count = physics.Length;
+
+        _physicsBuffer!.CopyFrom(physics);
+
+        GraphicsDevice.GetDefault().For(
+            count,
+            new RenderMapperShader(_physicsBuffer, _vertexBuffer!, colorMode, baseSize, sizeScale));
+
+        _vertexBuffer!.CopyTo(vertices);
+    }
+
+    private static void MapOnCpu(
+        ReadOnlySpan<PhysicsNodeState> physics,
+        Span<RenderNodeVertex> vertices,
+        int colorMode,
+        float baseSize,
+        float sizeScale)
+    {
+        for (int i = 0; i < physics.Length; i++)
+        {
+            ref readonly PhysicsNodeState p = ref physics[i];
+
+            float x = (float)p.X;
+            float y = (float)p.Y;
+            float z = (float)p.Z;
+
+            float probDensity = (float)(p.PsiReal * p.PsiReal + p.PsiImag * p.PsiImag);
+            float phase = MathF.Atan2((float)p.PsiImag, (float)p.PsiReal);
+
+            float hue = (phase + MathF.PI) / (2f * MathF.PI);
+            HsvToRgb(hue, 1f, 1f, out float r, out float g, out float b);
+
+            if (colorMode == 1)
+            {
+                float brightness = Math.Clamp((float)p.Potential * 0.5f + 0.5f, 0f, 1f);
+                r = g = b = brightness;
+            }
+            else if (colorMode == 2)
+            {
+                float massFactor = Math.Clamp((float)p.Mass / 10f, 0f, 1f);
+                r = massFactor;
+                g = 0.2f;
+                b = 1f - massFactor;
+            }
+
+            float size = baseSize + probDensity * sizeScale;
+
+            vertices[i] = new RenderNodeVertex
+            {
+                X = x,
+                Y = y,
+                Z = z,
+                R = r,
+                G = g,
+                B = b,
+                A = 1f,
+                Size = size
+            };
+        }
+    }
+
+
+    private static void HsvToRgb(float h, float s, float v, out float r, out float g, out float b)
+    {
+        float c = v * s;
+        float x = c * (1f - MathF.Abs(h * 6f % 2f - 1f));
+        float m = v - c;
+
+        float hue6 = h * 6f;
+
+        if (hue6 < 1f) { r = c; g = x; b = 0f; }
+        else if (hue6 < 2f) { r = x; g = c; b = 0f; }
+        else if (hue6 < 3f) { r = 0f; g = c; b = x; }
+        else if (hue6 < 4f) { r = 0f; g = x; b = c; }
+        else if (hue6 < 5f) { r = x; g = 0f; b = c; }
+        else { r = c; g = 0f; b = x; }
+
+        r += m;
+        g += m;
+        b += m;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+
+        _disposed = true;
+
+        _physicsBuffer?.Dispose();
+        _physicsBuffer = null;
+
+        _vertexBuffer?.Dispose();
+        _vertexBuffer = null;
+    }
+}

@@ -1,0 +1,48 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0-windows</TargetFramework>
+		<Nullable>enable</Nullable>
+		<UseWindowsForms>true</UseWindowsForms>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<PlatformTarget>x64</PlatformTarget>
+		<AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+		<EnableWindowsTargeting>true</EnableWindowsTargeting>
+		<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+	</PropertyGroup>
+
+	<ItemGroup>
+	  <Compile Remove="Rendering\Interfaces\**" />
+	  <EmbeddedResource Remove="Rendering\Interfaces\**" />
+	  <None Remove="Rendering\Interfaces\**" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<!-- SIMD operations (usually included but explicit for clarity) -->
+		<PackageReference Include="System.Numerics.Vectors" Version="4.6.1" />
+
+		<!-- ECS Framework -->
+		<PackageReference Include="Arch" Version="2.1.0" />
+
+		<!-- ImGui for immediate mode UI -->
+		<PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+
+		<!-- Vortice DX12 stack (new backend) -->
+		<PackageReference Include="Vortice.Direct3D12" Version="[3.*,)" />
+		<PackageReference Include="Vortice.DXGI" Version="[3.*,)" />
+		<PackageReference Include="Vortice.D3DCompiler" Version="[3.*,)" />
+		<PackageReference Include="Vortice.Mathematics" Version="2.1.0" />
+
+		<!-- Existing (can be used by current code; keep for compatibility) -->
+		<PackageReference Include="Vortice.DirectX" Version="3.8.2" />
+
+		<!-- ComputeSharp for GPU compute interop with DX12 -->
+		<PackageReference Include="ComputeSharp" Version="3.2.0" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\RqSimGraphEngine\RqSimGraphEngine.csproj" />
+		<ProjectReference Include="..\RqSimRenderingEngine.Abstractions\RqSimRenderingEngine.Abstractions.csproj" />
+	</ItemGroup>
+
+</Project>

@@ -1,0 +1,178 @@
+// Original MCMCSampler.cs - Backup before GPU optimization (Stage 4)
+// Date: 2024
+// Moved to Alternate folder as part of GPU MCMC implementation
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace RQSimulation
+{
+    /// <summary>
+    /// MCMC sampler for path integral quantum gravity.
+    /// Samples configurations satisfying Wheeler-DeWitt constraint.
+    /// 
+    /// PHYSICS:
+    /// - Instead of time evolution, we sample configurations from the partition function
+    /// - Z = ? D[g] exp(-S_E[g]) where S_E is the Euclidean action
+    /// - Metropolis-Hastings acceptance: P_accept = exp(-(S_new - S_old))
+    /// </summary>
+    public sealed class MCMCSampler
+    {
+        private readonly RQGraph _graph;
+        private readonly Random _rng;
+        private double _currentAction;
+        
+        // Statistics
+        public int AcceptedMoves { get; private set; }
+        public int RejectedMoves { get; private set; }
+        public double AcceptanceRate => AcceptedMoves + RejectedMoves > 0 
+            ? (double)AcceptedMoves / (AcceptedMoves + RejectedMoves) : 0.0;
+        
+        public MCMCSampler(RQGraph graph, int seed = 42)
+        {
+            _graph = graph ?? throw new ArgumentNullException(nameof(graph));
+            _rng = new Random(seed);
+            _currentAction = CalculateEuclideanAction();
+        }
+        
+        /// <summary>
+        /// Calculate Euclidean action for current configuration.
+        /// S_E = S_gravity + S_matter + S_gauge
+        /// </summary>
+        public double CalculateEuclideanAction()
+        {
+            // Use the constraint-weighted Hamiltonian as the effective Euclidean action
+            // This ensures we sample configurations near the constraint surface H ? 0
+            return _graph.ComputeConstraintWeightedHamiltonian();
+        }
+        
+        /// <summary>
+        /// Sample configuration space using Metropolis-Hastings.
+        /// </summary>
+        public void SampleConfigurationSpace(int samples, Action<int, RQGraph>? onSample = null)
+        {
+            for (int i = 0; i < samples; i++)
+            {
+                var (deltaAction, applyMove, revertMove) = ProposeMove();
+                
+                // Metropolis acceptance criterion
+                // P_accept = min(1, exp(-deltaS))
+                // If deltaS < 0 (action decreases), exp(-deltaS) > 1 -> always accept
+                // If deltaS > 0 (action increases), accept with probability exp(-deltaS)
+                
+                bool accept = false;
+                if (deltaAction <= 0)
+                {
+                    accept = true;
+                }
+                else
+                {
+                    double p = Math.Exp(-deltaAction);
+                    if (_rng.NextDouble() < p)
+                    {
+                        accept = true;
+                    }
+                }
+                
+                if (accept)
+                {
+                    applyMove();
+                    _currentAction += deltaAction;
+                    AcceptedMoves++;
+                }
+                
+                if (!accept)
+                {
+                    RejectedMoves++;
+                }
+                
+                onSample?.Invoke(i, _graph);
+            }
+        }
+        
+        /// <summary>
+        /// Propose topology change (edge addition/removal/weight change).
+        /// Returns proposed action change without applying.
+        /// </summary>
+        public (double deltaAction, Action applyMove, Action revertMove) ProposeMove()
+        {
+            // 1. Select random move type: Add Edge, Remove Edge, Change Weight
+            int moveType = _rng.Next(3);
+            
+            int i = _rng.Next(_graph.N);
+            int j = _rng.Next(_graph.N);
+            while (i == j) j = _rng.Next(_graph.N);
+            
+            // Ensure i < j for consistency
+            if (i > j) (i, j) = (j, i);
+            
+            bool edgeExists = _graph.Edges[i, j];
+            double currentWeight = _graph.Weights[i, j];
+            
+            // Adjust move type based on existence
+            if (moveType == 0 && edgeExists) moveType = 2; // Can't add, so change weight
+            if (moveType == 1 && !edgeExists) moveType = 0; // Can't remove, so add
+            
+            double newWeight = currentWeight;
+            bool newExists = edgeExists;
+            
+            if (moveType == 0) // Add Edge
+            {
+                newExists = true;
+                newWeight = _rng.NextDouble(); // Random weight 0-1
+            }
+            else if (moveType == 1) // Remove Edge
+            {
+                newExists = false;
+                newWeight = 0.0;
+            }
+            else // Change Weight
+            {
+                // Small perturbation
+                newWeight = currentWeight + (_rng.NextDouble() - 0.5) * 0.1;
+                newWeight = Math.Clamp(newWeight, 0.0, 1.0);
+                if (newWeight < 0.01) // Threshold for removal
+                {
+                    newExists = false;
+                    newWeight = 0.0;
+                }
+            }
+            
+            // Apply move temporarily
+            _graph.Edges[i, j] = newExists;
+            _graph.Edges[j, i] = newExists;
+            _graph.Weights[i, j] = newWeight;
+            _graph.Weights[j, i] = newWeight;
+            
+            double newAction = CalculateEuclideanAction();
+            double delta = newAction - _currentAction;
+            
+            // Revert immediately so we return the "proposal"
+            _graph.Edges[i, j] = edgeExists;
+            _graph.Edges[j, i] = edgeExists;
+            _graph.Weights[i, j] = currentWeight;
+            _graph.Weights[j, i] = currentWeight;
+            
+            Action apply = () => 
+            {
+                _graph.Edges[i, j] = newExists;
+                _graph.Edges[j, i] = newExists;
+                _graph.Weights[i, j] = newWeight;
+                _graph.Weights[j, i] = newWeight;
+            };
+            
+            Action revert = () =>
+            {
+                _graph.Edges[i, j] = edgeExists;
+                _graph.Edges[j, i] = edgeExists;
+                _graph.Weights[i, j] = currentWeight;
+                _graph.Weights[j, i] = currentWeight;
+            };
+            
+            return (delta, apply, revert);
+        }
+    }
+}

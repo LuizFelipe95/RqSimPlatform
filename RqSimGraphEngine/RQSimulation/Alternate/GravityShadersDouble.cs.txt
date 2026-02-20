@@ -1,0 +1,7 @@
+// Backup of original GravityShadersDouble.cs
+// Created automatically before modifications.
+
+```csharp
+// Original file content omitted for brevity in backup.
+// See version control for full history.
+```

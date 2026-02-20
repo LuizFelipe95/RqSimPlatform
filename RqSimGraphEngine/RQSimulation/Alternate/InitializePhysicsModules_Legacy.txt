@@ -1,0 +1,119 @@
+// =====================================================================
+// LEGACY BACKUP: InitializePhysicsModules from SimulationEngine.cs
+// Backed up on refactoring to plugin-based PhysicsPipeline system.
+// 
+// This code was replaced by modular IPhysicsModule implementations
+// registered in PhysicsPipeline. See Core/Plugins/ folder.
+// =====================================================================
+
+/// <summary>
+/// Initializes all physics modules based on configuration.
+/// LEGACY - replaced by PhysicsPipeline.InitializeAll()
+/// </summary>
+private void InitializePhysicsModules()
+{
+    if (_cfg.UseSpacetimePhysics)
+    {
+        _graph.InitSpacetimeCoordinates();
+    }
+
+    if (_cfg.UseYangMillsGauge || _cfg.UseSpinorField)
+    {
+        _graph.InitSpinorField(0.01);
+    }
+
+    if (_cfg.UseVacuumFluctuations)
+    {
+        _graph.InitVacuumField();
+    }
+
+    if (_cfg.UseBlackHolePhysics)
+    {
+        _graph.InitBlackHolePhysics();
+    }
+
+    if (_cfg.UseYangMillsGauge)
+    {
+        _graph.InitYangMillsFields();
+        _graph.InitEdgeGaugePhases();
+    }
+
+    if (_cfg.UseEnhancedKleinGordon)
+    {
+        _graph.InitEnhancedKleinGordon(0.01);
+    }
+
+    if (_cfg.UseInternalTime)
+    {
+        _graph.InitClockSubsystem(0.05);
+    }
+
+    if (_cfg.UseRelationalTime)
+    {
+        int clockSize = Math.Max(2, _graph.N / 20);
+        _graph.InitInternalClock(clockSize);
+    }
+
+    if (_cfg.UseSpectralGeometry)
+    {
+        _graph.UpdateSpectralCoordinates();
+        _graph.SyncCoordinatesFromSpectral();
+    }
+
+    if (_cfg.UseQuantumGraphity)
+    {
+        _graph.NetworkTemperature = _cfg.InitialNetworkTemperature;
+    }
+
+    if (_cfg.UseAsynchronousTime)
+    {
+        _graph.InitAsynchronousTime();
+    }
+
+    if (_cfg.UseUnifiedPhysicsStep)
+    {
+        // RQ-FIX: Asynchronous updates are now always enabled (RQ-compliant default)
+        // UseAsynchronousUpdates property has been removed - async mode is the only option
+        _graph.EnforceGaugeConstraintsEnabled = _cfg.EnforceGaugeConstraints;
+        _graph.ValidateEnergyConservationEnabled = _cfg.ValidateEnergyConservation;
+    }
+
+    // Mexican Hat (Higgs) potential
+    if (_cfg.UseMexicanHatPotential)
+    {
+        if (_cfg.UseHotStartAnnealing)
+        {
+            _graph.InitScalarFieldHotStart(_cfg.HotStartTemperature);
+        }
+        else
+        {
+            _graph.InitScalarFieldMexicanHat(0.01);
+        }
+    }
+
+    // Geometry momenta for gravitational waves
+    if (_cfg.UseGeometryMomenta)
+    {
+        _graph.InitGeometryMomenta();
+    }
+}
+
+// =====================================================================
+// MIGRATION GUIDE:
+// 
+// Old approach (monolithic):
+//   InitializePhysicsModules();
+// 
+// New approach (modular pipeline):
+//   Pipeline.RegisterModule(new SpacetimePhysicsModule());
+//   Pipeline.RegisterModule(new SpinorFieldModule());
+//   Pipeline.RegisterModule(new VacuumFluctuationsModule());
+//   // ... etc
+//   Pipeline.InitializeAll(_graph);
+// 
+// Benefits:
+// - Modules can be enabled/disabled at runtime
+// - Order can be changed via UI
+// - External DLL modules can be loaded
+// - GPU/CPU variants can be swapped
+// =====================================================================

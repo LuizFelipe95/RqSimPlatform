@@ -1,0 +1,549 @@
+using ComputeSharp;
+
+namespace RQSimulation.GPUOptimized.Topology;
+
+/// <summary>
+/// GPU Topological Invariants: Wilson Loop computation and gauge flux detection.
+/// 
+/// RQ-HYPOTHESIS CHECKLIST ITEM 1: Topological Protection via Wilson Loops
+/// ========================================================================
+/// Parallel GPU computation of local gauge invariants (Wilson loops) for
+/// verifying gauge invariance before topology modifications.
+/// 
+/// PHYSICS:
+/// - Wilson loop W = exp(i?A·dl) = U_ij · U_jk · U_ki measures magnetic flux through a triangle
+/// - |W - 1| > tolerance ? edge carries physical gauge flux (cannot be removed)
+/// - Flux conservation is enforced by Gauss's law ?·E = ?
+/// 
+/// GPU STRATEGY:
+/// - Per-node parallel: each thread computes Wilson flux for triangles containing that node
+/// - CSR format enables efficient neighbor iteration
+/// - Double precision for phase accumulation (FP64 critical for gauge invariance)
+/// 
+/// USAGE:
+/// 1. Call WilsonFluxPerNodeShader to compute local magnetic flux
+/// 2. Check if any node has significant flux before allowing edge removal
+/// 3. Use with GaugeAwareTopology for coordinated topological moves
+/// </summary>
+
+/// <summary>
+/// Compute local Wilson loop flux for each node.
+/// Sums gauge phase around all triangles containing the node.
+/// 
+/// OUTPUT: NodeFlux[i] = ?_triangles Arg(U_ij · U_jk · U_ki)
+/// 
+/// This detects nodes that participate in gauge-invariant flux loops.
+/// </summary>
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+[GeneratedComputeShaderDescriptor]
+[RequiresDoublePrecisionSupport]
+public readonly partial struct WilsonFluxPerNodeShader : IComputeShader
+{
+    /// <summary>CSR row offsets (size = NodeCount + 1)</summary>
+    public readonly ReadOnlyBuffer<int> rowOffsets;
+
+    /// <summary>CSR column indices (size = Nnz)</summary>
+    public readonly ReadOnlyBuffer<int> colIndices;
+
+    /// <summary>Gauge phase on each edge (size = Nnz). Phase ?_ij such that U_ij = exp(i·?_ij)</summary>
+    public readonly ReadOnlyBuffer<double> edgePhases;
+
+    /// <summary>Output: accumulated magnetic flux through triangles at each node</summary>
+    public readonly ReadWriteBuffer<double> nodeFlux;
+
+    /// <summary>Number of nodes</summary>
+    public readonly int nodeCount;
+
+    /// <summary>
+    /// Initializes the Wilson flux shader.
+    /// </summary>
+    public WilsonFluxPerNodeShader(
+        ReadOnlyBuffer<int> rowOffsets,
+        ReadOnlyBuffer<int> colIndices,
+        ReadOnlyBuffer<double> edgePhases,
+        ReadWriteBuffer<double> nodeFlux,
+        int nodeCount)
+    {
+        this.rowOffsets = rowOffsets;
+        this.colIndices = colIndices;
+        this.edgePhases = edgePhases;
+        this.nodeFlux = nodeFlux;
+        this.nodeCount = nodeCount;
+    }
+
+    public void Execute()
+    {
+        int u = ThreadIds.X;
+        if (u >= nodeCount) return;
+
+        double localFlux = 0.0;
+        int uStart = rowOffsets[u];
+        int uEnd = rowOffsets[u + 1];
+
+        // For each neighbor v of u
+        for (int i = uStart; i < uEnd; i++)
+        {
+            int v = colIndices[i];
+            if (v <= u) continue; // Avoid double-counting (only process u < v)
+
+            double phase_uv = edgePhases[i];
+
+            int vStart = rowOffsets[v];
+            int vEnd = rowOffsets[v + 1];
+
+            // Find common neighbors (completing triangles u-v-w-u)
+            // Use two-pointer intersection on sorted neighbor lists
+            int iU = uStart;
+            int iV = vStart;
+
+            while (iU < uEnd && iV < vEnd)
+            {
+                int neighborU = colIndices[iU];
+                int neighborV = colIndices[iV];
+
+                if (neighborU == neighborV)
+                {
+                    // Found common neighbor w - this forms triangle (u, v, w)
+                    int w = neighborU;
+                    if (w != u && w != v && w > v) // Only count once per triangle
+                    {
+                        // Get phases for edges v->w and w->u
+                        double phase_vw = GetEdgePhase(v, w);
+                        double phase_wu = GetEdgePhase(w, u);
+
+                        // Wilson loop phase: ?_uv + ?_vw + ?_wu (mod 2?)
+                        double trianglePhase = phase_uv + phase_vw + phase_wu;
+
+                        // Normalize to [-?, ?]
+                        trianglePhase = NormalizePhase(trianglePhase);
+
+                        localFlux += trianglePhase * trianglePhase; // Squared flux magnitude
+                    }
+                    iU++;
+                    iV++;
+                }
+                else if (neighborU < neighborV)
+                {
+                    iU++;
+                }
+                else
+                {
+                    iV++;
+                }
+            }
+        }
+
+        nodeFlux[u] = localFlux;
+    }
+
+    /// <summary>
+    /// Get edge phase from node a to node b using binary search in CSR.
+    /// Returns 0.0 if edge not found.
+    /// </summary>
+    private double GetEdgePhase(int a, int b)
+    {
+        int start = rowOffsets[a];
+        int end = rowOffsets[a + 1];
+
+        // Binary search for neighbor b
+        while (start < end)
+        {
+            int mid = (start + end) / 2;
+            int neighbor = colIndices[mid];
+            if (neighbor == b)
+            {
+                return edgePhases[mid];
+            }
+            else if (neighbor < b)
+            {
+                start = mid + 1;
+            }
+            else
+            {
+                end = mid;
+            }
+        }
+
+        return 0.0; // Edge not found
+    }
+
+    /// <summary>
+    /// Normalize phase to [-?, ?] range.
+    /// </summary>
+    private static double NormalizePhase(double phase)
+    {
+        const double TwoPi = 6.283185307179586;
+        const double Pi = 3.141592653589793;
+
+        // Reduce to [0, 2?) using double arithmetic
+        double div = phase / TwoPi;
+        double floorVal = div >= 0 ? (int)div : (int)div - 1;
+        phase = phase - TwoPi * floorVal;
+
+        if (phase > Pi)
+            phase -= TwoPi;
+
+        return phase;
+    }
+}
+
+/// <summary>
+/// Check if edges can be safely removed based on Wilson loop flux.
+/// Marks edges as "protected" if their removal would violate gauge invariance.
+/// 
+/// OUTPUT: edgeProtected[e] = 1 if edge carries significant gauge flux, 0 otherwise
+/// </summary>
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+[GeneratedComputeShaderDescriptor]
+[RequiresDoublePrecisionSupport]
+public readonly partial struct EdgeGaugeProtectionShader : IComputeShader
+{
+    /// <summary>CSR row offsets</summary>
+    public readonly ReadOnlyBuffer<int> rowOffsets;
+
+    /// <summary>CSR column indices</summary>
+    public readonly ReadOnlyBuffer<int> colIndices;
+
+    /// <summary>Gauge phase on each edge</summary>
+    public readonly ReadOnlyBuffer<double> edgePhases;
+
+    /// <summary>Output: 1 if edge is protected, 0 if can be removed</summary>
+    public readonly ReadWriteBuffer<int> edgeProtected;
+
+    /// <summary>Tolerance for "trivial" phase (edges below this can be removed)</summary>
+    public readonly double phaseTolerance;
+
+    /// <summary>Number of edges (Nnz)</summary>
+    public readonly int edgeCount;
+
+    /// <summary>Number of nodes</summary>
+    public readonly int nodeCount;
+
+    /// <summary>
+    /// Initializes the edge protection shader.
+    /// </summary>
+    public EdgeGaugeProtectionShader(
+        ReadOnlyBuffer<int> rowOffsets,
+        ReadOnlyBuffer<int> colIndices,
+        ReadOnlyBuffer<double> edgePhases,
+        ReadWriteBuffer<int> edgeProtected,
+        double phaseTolerance,
+        int edgeCount,
+        int nodeCount)
+    {
+        this.rowOffsets = rowOffsets;
+        this.colIndices = colIndices;
+        this.edgePhases = edgePhases;
+        this.edgeProtected = edgeProtected;
+        this.phaseTolerance = phaseTolerance;
+        this.edgeCount = edgeCount;
+        this.nodeCount = nodeCount;
+    }
+
+    public void Execute()
+    {
+        int edgeIdx = ThreadIds.X;
+        if (edgeIdx >= edgeCount) return;
+
+        // Find which node this edge belongs to (source node u)
+        int u = FindSourceNode(edgeIdx);
+        if (u < 0 || u >= nodeCount)
+        {
+            edgeProtected[edgeIdx] = 0;
+            return;
+        }
+
+        int v = colIndices[edgeIdx];
+        double phase_uv = edgePhases[edgeIdx];
+
+        // Check if edge phase itself is significant
+        double normalizedPhase = NormalizePhase(phase_uv);
+        if (Hlsl.Abs((float)normalizedPhase) < (float)phaseTolerance)
+        {
+            // Trivial phase - check if part of non-trivial Wilson loop
+            double maxTriangleFlux = ComputeMaxTriangleFlux(u, v, edgeIdx);
+
+            if (maxTriangleFlux < phaseTolerance * phaseTolerance)
+            {
+                edgeProtected[edgeIdx] = 0; // Safe to remove
+                return;
+            }
+        }
+
+        // Edge carries significant flux or is part of non-trivial loop
+        edgeProtected[edgeIdx] = 1;
+    }
+
+    /// <summary>
+    /// Find source node for edge at given CSR index using binary search on rowOffsets.
+    /// </summary>
+    private int FindSourceNode(int edgeIdx)
+    {
+        int low = 0;
+        int high = nodeCount;
+
+        while (low < high)
+        {
+            int mid = (low + high) / 2;
+            if (rowOffsets[mid + 1] <= edgeIdx)
+            {
+                low = mid + 1;
+            }
+            else
+            {
+                high = mid;
+            }
+        }
+
+        return low;
+    }
+
+    /// <summary>
+    /// Compute maximum Wilson loop flux for triangles containing edge (u, v).
+    /// </summary>
+    private double ComputeMaxTriangleFlux(int u, int v, int edgeIdxUV)
+    {
+        double maxFlux = 0.0;
+        double phase_uv = edgePhases[edgeIdxUV];
+
+        int uStart = rowOffsets[u];
+        int uEnd = rowOffsets[u + 1];
+        int vStart = rowOffsets[v];
+        int vEnd = rowOffsets[v + 1];
+
+        // Find common neighbors (triangle vertices)
+        int iU = uStart;
+        int iV = vStart;
+
+        while (iU < uEnd && iV < vEnd)
+        {
+            int neighborU = colIndices[iU];
+            int neighborV = colIndices[iV];
+
+            if (neighborU == neighborV)
+            {
+                int w = neighborU;
+                if (w != u && w != v)
+                {
+                    // Get phases for completing the triangle
+                    double phase_vw = edgePhases[iV]; // v->w (approximate, may need lookup)
+                    double phase_wu = GetEdgePhaseSearch(w, u);
+
+                    double trianglePhase = phase_uv + phase_vw + phase_wu;
+                    trianglePhase = NormalizePhase(trianglePhase);
+
+                    double flux = trianglePhase * trianglePhase;
+                    if (flux > maxFlux)
+                        maxFlux = flux;
+                }
+                iU++;
+                iV++;
+            }
+            else if (neighborU < neighborV)
+            {
+                iU++;
+            }
+            else
+            {
+                iV++;
+            }
+        }
+
+        return maxFlux;
+    }
+
+    /// <summary>
+    /// Binary search for edge phase from a to b.
+    /// </summary>
+    private double GetEdgePhaseSearch(int a, int b)
+    {
+        int start = rowOffsets[a];
+        int end = rowOffsets[a + 1];
+
+        while (start < end)
+        {
+            int mid = (start + end) / 2;
+            int neighbor = colIndices[mid];
+            if (neighbor == b)
+            {
+                return edgePhases[mid];
+            }
+            else if (neighbor < b)
+            {
+                start = mid + 1;
+            }
+            else
+            {
+                end = mid;
+            }
+        }
+
+        return 0.0;
+    }
+
+    private static double NormalizePhase(double phase)
+    {
+        const double TwoPi = 6.283185307179586;
+        const double Pi = 3.141592653589793;
+
+        // Reduce to [0, 2?) using double arithmetic
+        double div = phase / TwoPi;
+        double floorVal = div >= 0 ? (int)div : (int)div - 1;
+        phase = phase - TwoPi * floorVal;
+
+        if (phase > Pi)
+            phase -= TwoPi;
+
+        return phase;
+    }
+}
+
+/// <summary>
+/// Compute partial sums of gauge flux for reduction.
+/// Uses block-level accumulation (first thread per block sums its range).
+/// 
+/// OUTPUT: partialSums[blockId] = sum of nodeFlux[start..end]
+/// CPU or second-pass reduction computes final total.
+/// 
+/// This avoids atomic operations on double which are not natively supported.
+/// </summary>
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+[GeneratedComputeShaderDescriptor]
+[RequiresDoublePrecisionSupport]
+public readonly partial struct GaugeFluxReductionShader : IComputeShader
+{
+    /// <summary>Per-node flux values (from WilsonFluxPerNodeShader)</summary>
+    public readonly ReadOnlyBuffer<double> nodeFlux;
+
+    /// <summary>Output: partial sums per thread block</summary>
+    public readonly ReadWriteBuffer<double> partialSums;
+
+    /// <summary>Number of nodes</summary>
+    public readonly int nodeCount;
+
+    /// <summary>Block size for reduction</summary>
+    public readonly int blockSize;
+
+    /// <summary>
+    /// Initializes the flux reduction shader.
+    /// </summary>
+    public GaugeFluxReductionShader(
+        ReadOnlyBuffer<double> nodeFlux,
+        ReadWriteBuffer<double> partialSums,
+        int nodeCount,
+        int blockSize)
+    {
+        this.nodeFlux = nodeFlux;
+        this.partialSums = partialSums;
+        this.nodeCount = nodeCount;
+        this.blockSize = blockSize;
+    }
+
+    public void Execute()
+    {
+        int idx = ThreadIds.X;
+        int blockId = idx / blockSize;
+        int localId = idx % blockSize;
+
+        // Only first thread in each block computes the sum
+        if (localId == 0)
+        {
+            int start = blockId * blockSize;
+            int end = start + blockSize;
+            if (end > nodeCount) end = nodeCount;
+
+            double blockSum = 0.0;
+            for (int i = start; i < end; i++)
+            {
+                blockSum += nodeFlux[i];
+            }
+
+            partialSums[blockId] = blockSum;
+        }
+    }
+}
+
+/// <summary>
+/// Count triangles per node for Forman-Ricci curvature approximation.
+/// This is a prerequisite for Ollivier-Ricci curvature GPU computation.
+/// 
+/// OUTPUT: triangleCounts[i] = number of triangles containing node i
+/// </summary>
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+[GeneratedComputeShaderDescriptor]
+public readonly partial struct TriangleCountShader : IComputeShader
+{
+    /// <summary>CSR row offsets</summary>
+    public readonly ReadOnlyBuffer<int> rowOffsets;
+
+    /// <summary>CSR column indices (must be sorted per row)</summary>
+    public readonly ReadOnlyBuffer<int> colIndices;
+
+    /// <summary>Output: triangle count per node</summary>
+    public readonly ReadWriteBuffer<int> triangleCounts;
+
+    /// <summary>Number of nodes</summary>
+    public readonly int nodeCount;
+
+    /// <summary>
+    /// Initializes the triangle count shader.
+    /// </summary>
+    public TriangleCountShader(
+        ReadOnlyBuffer<int> rowOffsets,
+        ReadOnlyBuffer<int> colIndices,
+        ReadWriteBuffer<int> triangleCounts,
+        int nodeCount)
+    {
+        this.rowOffsets = rowOffsets;
+        this.colIndices = colIndices;
+        this.triangleCounts = triangleCounts;
+        this.nodeCount = nodeCount;
+    }
+
+    public void Execute()
+    {
+        int u = ThreadIds.X;
+        if (u >= nodeCount) return;
+
+        int count = 0;
+        int uStart = rowOffsets[u];
+        int uEnd = rowOffsets[u + 1];
+
+        // For each pair of neighbors (v, w), check if v-w edge exists
+        for (int i = uStart; i < uEnd; i++)
+        {
+            int v = colIndices[i];
+            if (v <= u) continue;
+
+            int vStart = rowOffsets[v];
+            int vEnd = rowOffsets[v + 1];
+
+            // Intersection of u's neighbors and v's neighbors
+            int iU = i + 1; // Start after v in u's list
+            int iV = vStart;
+
+            while (iU < uEnd && iV < vEnd)
+            {
+                int neighborU = colIndices[iU];
+                int neighborV = colIndices[iV];
+
+                if (neighborU == neighborV && neighborU > v)
+                {
+                    count++;
+                    iU++;
+                    iV++;
+                }
+                else if (neighborU < neighborV)
+                {
+                    iU++;
+                }
+                else
+                {
+                    iV++;
+                }
+            }
+        }
+
+        triangleCounts[u] = count;
+    }
+}

@@ -1,0 +1,282 @@
+// Original backup before Wheeler-DeWitt Constraint implementation (Stage 2)
+// Backup date: Stage 2 of modernization plan
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Numerics;
+
+namespace RQSimulation
+{
+    /// <summary>
+    /// Quantum Graphity dynamics: Hamiltonian and energy calculations.
+    /// </summary>
+    public partial class RQGraph
+    {
+        // Network Hamiltonian parameters
+        private double _linkCostCoeff = 0.1;    // Penalty for having links
+        private double _lengthCostCoeff = 0.05; // Penalty for long links
+        private double _matterCouplingCoeff = 0.2; // Matter-geometry coupling
+
+        /// <summary>
+        /// Cosmological constant (Lambda) - prevents graph collapse/explosion.
+        /// Positive Lambda favors expansion (de Sitter), negative favors contraction.
+        /// The term Lambda * V is added to the Hamiltonian where V is effective volume.
+        /// REDUCED from 0.01 to 0.001 to prevent excessive edge deletion.
+        /// </summary>
+        private double _cosmologicalConstant = 0.001;
+
+        /// <summary>
+        /// Gets or sets the cosmological constant (Lambda).
+        /// Positive values resist collapse, negative values resist expansion.
+        /// </summary>
+        public double CosmologicalConstant
+        {
+            get => _cosmologicalConstant;
+            set => _cosmologicalConstant = value;
+        }
+
+        /// <summary>
+        /// Compute the network Hamiltonian H = H_links + H_nodes
+        /// H_links: Cost of having edges (prefers sparse graphs)
+        /// H_nodes: Matter contribution (correlation mass)
+        /// </summary>
+        public double ComputeNetworkHamiltonian()
+        {
+            double H_links = 0.0;
+            double H_nodes = 0.0;
+
+            // H_links: Sum over all edges of (1 - w_ij) weighted by link cost
+            // This penalizes weak links more than strong ones
+            int edgeCount = 0;
+            for (int i = 0; i < N; i++)
+            {
+                for (int j = i + 1; j < N; j++)
+                {
+                    if (!Edges[i, j]) continue;
+                    edgeCount++;
+
+                    double w = Weights[i, j];
+
+                    // Link existence cost (sparse graph preference)
+                    H_links += _linkCostCoeff * (1.0 - w * w);
+
+                    // Length cost (strong links = short effective distance)
+                    double effectiveLength = w > 1e-10 ? 1.0 / w : 10.0;
+                    H_links += _lengthCostCoeff * effectiveLength;
+                }
+            }
+
+            // H_nodes: Matter contribution
+            if (_correlationMass != null && _correlationMass.Length == N)
+            {
+                for (int i = 0; i < N; i++)
+                {
+                    // Mass-curvature coupling (Einstein-like)
+                    double mass = _correlationMass[i];
+                    double curvature = GetLocalCurvature(i);
+
+                    // Matter wants to curve space (positive contribution when uncurved)
+                    H_nodes += _matterCouplingCoeff * mass * (1.0 - Math.Abs(curvature));
+                }
+            }
+
+            // Add string energy contribution if present
+            if (_stringEnergy != null && _stringEnergy.GetLength(0) == N)
+            {
+                for (int i = 0; i < N; i++)
+                {
+                    for (int j = i + 1; j < N; j++)
+                    {
+                        H_links += _stringEnergy[i, j];
+                    }
+                }
+            }
+
+            return H_links + H_nodes;
+        }
+
+        /// <summary>
+        /// Compute local energy contribution for a single edge.
+        /// Used for efficient delta-energy calculation in Metropolis step.
+        /// </summary>
+        private double ComputeEdgeEnergy(int i, int j)
+        {
+            if (!Edges[i, j]) return 0.0;
+
+            double w = Weights[i, j];
+
+            double energy = _linkCostCoeff * (1.0 - w * w);
+            double effectiveLength = w > 1e-10 ? 1.0 / w : 10.0;
+            energy += _lengthCostCoeff * effectiveLength;
+
+            if (_stringEnergy != null && i < N && j < N)
+                energy += _stringEnergy[i, j];
+
+            return energy;
+        }
+
+        /// <summary>
+        /// Compute local Hamiltonian contribution for a single edge (i,j) and its neighbors.
+        /// This includes: gravity (Ricci curvature), matter coupling, and cosmological constant.
+        /// Used for efficient O(degree) delta-energy calculation instead of O(N^2) full recalculation.
+        /// 
+        /// RQ-HYPOTHESIS CHECKLIST ITEM 4: 4D Dimension Driver
+        /// ===================================================
+        /// Adds penalty term when local volume growth deviates from r^4 scaling.
+        /// Without this, simulation produces fractal "dust" or collapses rather than
+        /// emergent 4D spacetime geometry.
+        /// </summary>
+        /// <param name="i">First node index</param>
+        /// <param name="j">Second node index</param>
+        /// <returns>Local energy contribution from edge (i,j) and affected neighbors</returns>
+        public double ComputeLocalHamiltonian(int i, int j)
+        {
+            double H_local = 0.0;
+
+            // 1. Edge energy contribution (link cost, length cost)
+            if (Edges[i, j])
+            {
+                double w = Weights[i, j];
+
+                // Link existence cost
+                H_local += _linkCostCoeff * (1.0 - w * w);
+
+                // Length cost (strong links = short effective distance)
+                double effectiveLength = w > 1e-10 ? 1.0 / w : 10.0;
+                H_local += _lengthCostCoeff * effectiveLength;
+
+                // String energy contribution
+                if (_stringEnergy != null && i < N && j < N)
+                    H_local += _stringEnergy[i, j];
+
+                // 2. Gravity contribution: Ricci curvature for this edge
+                double ricci = CalculateApproximateRicci(i, j);
+                double G_inv = 1.0 / 0.1;
+                H_local -= G_inv * ricci;
+            }
+
+            // 3. Matter coupling for affected nodes (i and j)
+            if (_correlationMass != null && _correlationMass.Length == N)
+            {
+                // Node i contribution
+                double mass_i = _correlationMass[i];
+                double curvature_i = GetLocalCurvature(i);
+                H_local += _matterCouplingCoeff * mass_i * (1.0 - Math.Abs(curvature_i));
+
+                // Node j contribution
+                double mass_j = _correlationMass[j];
+                double curvature_j = GetLocalCurvature(j);
+                H_local += _matterCouplingCoeff * mass_j * (1.0 - Math.Abs(curvature_j));
+            }
+
+            // 4. Cosmological constant term: Lambda * local_volume
+            // Local volume is approximated as sum of weights around nodes i and j
+            double localVolume = 0.0;
+            foreach (int k in Neighbors(i))
+                localVolume += Weights[i, k];
+            foreach (int k in Neighbors(j))
+                localVolume += Weights[j, k];
+            // Avoid double counting edge (i,j)
+            if (Edges[i, j])
+                localVolume -= Weights[i, j];
+
+            H_local += _cosmologicalConstant * localVolume;
+
+            // 5. RQ-HYPOTHESIS CHECKLIST ITEM 4: 4D Dimension Driver (Volume Growth Constraint)
+            // ================================================================================
+            // Penalize graph configurations where local volume growth V(r) deviates from
+            // r^4 scaling expected for 4D spacetime (Hausdorff dimension check).
+            // 
+            // For d-dimensional lattice: V(r) ~ r^d
+            // At r=1: V1 = degree (number of neighbors)
+            // At r=2: V2 = second neighbors
+            // Ratio: V2/V1 ? 2^(d-1) for regular lattice
+            // For 4D: target ratio = 2^3 = 8
+            H_local += ComputeDimensionalityPenalty(i, j);
+
+            return H_local;
+        }
+
+        public double CalculateApproximateRicci(int i, int j)
+        {
+            if (!Edges[i, j]) return 0.0;
+
+            double w_e = Weights[i, j];
+            double w_i = 0.0;
+            double w_j = 0.0;
+
+            foreach (var n in Neighbors(i)) w_i += Weights[i, n];
+            foreach (var n in Neighbors(j)) w_j += Weights[j, n];
+
+            w_i -= w_e;
+            w_j -= w_e;
+
+            double triangles = 0.0;
+            foreach (var n_i in Neighbors(i))
+            {
+                if (n_i == j) continue;
+                if (Edges[j, n_i])
+                {
+                    double w_in = Weights[i, n_i];
+                    double w_jn = Weights[j, n_i];
+                    triangles += Math.Sqrt(w_in * w_jn);
+                }
+            }
+
+            return w_e * (triangles - (w_i + w_j) * 0.1);
+        }
+
+        private double ComputeDimensionalityPenalty(int i, int j)
+        {
+            if (PhysicsConstants.EnableNaturalDimensionEmergence)
+            {
+                return 0.0;
+            }
+
+            int v1_i = 0;
+            foreach (var _ in Neighbors(i)) v1_i++;
+
+            int v1_j = 0;
+            foreach (var _ in Neighbors(j)) v1_j++;
+
+            if (v1_i < 2 || v1_j < 2)
+                return 0.0;
+
+            int v2_i = CountSecondNeighbors(i);
+
+            double growthRatio_i = (double)v2_i / v1_i;
+
+            double deviation = growthRatio_i - PhysicsConstants.TargetGrowthRatio4D;
+
+            return PhysicsConstants.DimensionPenalty * deviation * deviation;
+        }
+
+        private int CountSecondNeighbors(int node)
+        {
+            var visited = new System.Collections.Generic.HashSet<int> { node };
+            var firstNeighbors = new System.Collections.Generic.List<int>();
+
+            foreach (int n1 in Neighbors(node))
+            {
+                visited.Add(n1);
+                firstNeighbors.Add(n1);
+            }
+
+            int secondNeighborCount = 0;
+            foreach (int n1 in firstNeighbors)
+            {
+                foreach (int n2 in Neighbors(n1))
+                {
+                    if (!visited.Contains(n2))
+                    {
+                        visited.Add(n2);
+                        secondNeighborCount++;
+                    }
+                }
+            }
+
+            return secondNeighborCount;
+        }
+    }
+}

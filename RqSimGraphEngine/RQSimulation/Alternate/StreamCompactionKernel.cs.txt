@@ -1,0 +1,67 @@
+// Backup of StreamCompactionKernel.cs before atomic/warp-scan implementation
+// Original simple per-row sequential compact kernel
+
+using ComputeSharp;
+
+namespace RQSimulation.GPUCompressedSparseRow.Shaders;
+
+[GeneratedComputeShaderDescriptor]
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+[RequiresDoublePrecisionSupport]
+internal readonly partial struct CompactCsrKernel : IComputeShader
+{
+    public readonly ReadOnlyBuffer<int> OldRowOffsets;
+    public readonly ReadOnlyBuffer<int> OldColIndices;
+    public readonly ReadOnlyBuffer<double> OldWeights;
+    
+    public readonly ReadOnlyBuffer<int> NewRowOffsets;
+    public readonly ReadWriteBuffer<int> NewColIndices;
+    public readonly ReadWriteBuffer<double> NewWeights;
+
+    public readonly double WeightThreshold;
+    public readonly int NodeCount;
+
+    public CompactCsrKernel(
+        ReadOnlyBuffer<int> OldRowOffsets,
+        ReadOnlyBuffer<int> OldColIndices,
+        ReadOnlyBuffer<double> OldWeights,
+        ReadOnlyBuffer<int> NewRowOffsets,
+        ReadWriteBuffer<int> NewColIndices,
+        ReadWriteBuffer<double> NewWeights,
+        double WeightThreshold,
+        int NodeCount)
+    {
+        this.OldRowOffsets = OldRowOffsets;
+        this.OldColIndices = OldColIndices;
+        this.OldWeights = OldWeights;
+        this.NewRowOffsets = NewRowOffsets;
+        this.NewColIndices = NewColIndices;
+        this.NewWeights = NewWeights;
+        this.WeightThreshold = WeightThreshold;
+        this.NodeCount = NodeCount;
+    }
+
+    public void Execute()
+    {
+        int row = ThreadIds.X;
+        if (row >= NodeCount) return;
+
+        int oldStart = OldRowOffsets[row];
+        int oldEnd = OldRowOffsets[row + 1];
+        int writePos = NewRowOffsets[row];
+
+        int localPos = 0;
+
+        for (int k = oldStart; k < oldEnd; k++)
+        {
+            double w = OldWeights[k];
+            if (w >= WeightThreshold)
+            {
+                int idx = writePos + localPos;
+                NewColIndices[idx] = OldColIndices[k];
+                NewWeights[idx] = w;
+                localPos++;
+            }
+        }
+    }
+}

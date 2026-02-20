@@ -1,0 +1,28 @@
+// Backup of ScanKernels.cs before Blelloch implementation
+// Original simple Hillis-Steele step kernel
+
+using ComputeSharp;
+
+namespace RQSimulation.GPUCompressedSparseRow.Shaders;
+
+[GeneratedComputeShaderDescriptor]
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+[RequiresDoublePrecisionSupport]
+internal readonly partial struct PrefixSumKernel : IComputeShader
+{
+    public readonly ReadWriteBuffer<int> InputValues;
+    public readonly ReadWriteBuffer<int> OutputOffsets;
+    public readonly int N;
+    public readonly int Step;
+
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        if (i >= N) return;
+
+        if (i >= Step)
+            OutputOffsets[i] = InputValues[i] + InputValues[i - Step];
+        else
+            OutputOffsets[i] = InputValues[i];
+    }
+}

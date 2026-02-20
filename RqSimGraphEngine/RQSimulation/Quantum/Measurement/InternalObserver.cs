@@ -1,0 +1,537 @@
+using System;
+using System.Collections.Generic;
+using System.Numerics;
+using RQSimulation.GPUOptimized.Observer;
+
+namespace RQSimulation
+{
+    /// <summary>
+    /// Internal observer implemented as a subsystem of the graph.
+    /// 
+    /// RQ-HYPOTHESIS: Relational Observables
+    /// =====================================
+    /// Instead of external readout of variables, the "observer" is
+    /// a designated region of the graph that becomes entangled with
+    /// the system being measured.
+    /// 
+    /// Measurement results are encoded in the observer's local phase,
+    /// not extracted to external variables.
+    /// 
+    /// KEY PRINCIPLES:
+    /// - No "God's eye view" - observer must be part of the system
+    /// - Measurement creates correlations (entanglement), not direct readout
+    /// - Observer accumulates information through phase shifts
+    /// - Results are relational: observer-relative, not absolute
+    /// 
+    /// GPU ACCELERATION:
+    /// When UseGpuAcceleration is true, operations are offloaded to GPU
+    /// using GpuObserverEngine for 10-100x speedup on large graphs.
+    /// </summary>
+    public sealed class InternalObserver
+    {
+        private readonly RQGraph _graph;
+        private readonly HashSet<int> _observerNodes;
+        private readonly List<ObservationRecord> _observations;
+        private readonly Random _rng;
+        
+        // GPU acceleration (optional)
+        private GpuObserverEngine? _gpuEngine;
+        private bool _useGpu;
+
+        /// <summary>
+        /// Coupling strength for measurement interaction.
+        /// Controls how strongly observer becomes entangled with target.
+        /// </summary>
+        public double MeasurementCoupling { get; set; } = 0.1;
+
+        /// <summary>
+        /// Minimum correlation for measurement to register.
+        /// </summary>
+        public double MinMeasurementCorrelation { get; set; } = 0.01;
+
+        /// <summary>
+        /// All observation records accumulated by this observer.
+        /// </summary>
+        public IReadOnlyList<ObservationRecord> Observations => _observations;
+
+        /// <summary>
+        /// Nodes that comprise the observer subsystem.
+        /// </summary>
+        public IReadOnlyCollection<int> ObserverNodes => _observerNodes;
+
+        /// <summary>
+        /// Total number of measurements performed.
+        /// </summary>
+        public int MeasurementCount => _observations.Count;
+        
+        /// <summary>
+        /// Whether GPU acceleration is enabled.
+        /// </summary>
+        public bool UseGpuAcceleration 
+        { 
+            get => _useGpu && _gpuEngine != null;
+            set
+            {
+                if (value && _gpuEngine == null)
+                {
+                    TryInitializeGpuEngine();
+                }
+                _useGpu = value && _gpuEngine != null;
+            }
+        }
+
+        /// <summary>
+        /// Creates an internal observer from a set of graph nodes.
+        /// </summary>
+        /// <param name="graph">The RQ graph containing the observer nodes</param>
+        /// <param name="observerNodes">Node indices that form the observer subsystem</param>
+        /// <param name="seed">Random seed for stochastic measurement outcomes</param>
+        public InternalObserver(RQGraph graph, IEnumerable<int> observerNodes, int? seed = null)
+        {
+            _graph = graph ?? throw new ArgumentNullException(nameof(graph));
+            ArgumentNullException.ThrowIfNull(observerNodes);
+
+            _observerNodes = new HashSet<int>();
+            foreach (int node in observerNodes)
+            {
+                if (node < 0 || node >= graph.N)
+                    throw new ArgumentOutOfRangeException(nameof(observerNodes), 
+                        $"Node index {node} is out of range [0, {graph.N})");
+                _observerNodes.Add(node);
+            }
+
+            if (_observerNodes.Count == 0)
+                throw new ArgumentException("Observer must contain at least one node", nameof(observerNodes));
+
+            _observations = new List<ObservationRecord>();
+            _rng = seed.HasValue ? new Random(seed.Value) : new Random();
+            
+            // Try to initialize GPU engine (will silently fail if GPU not available)
+            TryInitializeGpuEngine();
+        }
+        
+        private void TryInitializeGpuEngine()
+        {
+            try
+            {
+                _gpuEngine = new GpuObserverEngine();
+                _gpuEngine.Initialize(_graph.N, _observerNodes, _graph.GaugeDimension);
+                _gpuEngine.MeasurementCoupling = MeasurementCoupling;
+                _gpuEngine.MinCorrelation = MinMeasurementCorrelation;
+                _useGpu = true;
+            }
+            catch
+            {
+                // GPU not available, use CPU fallback
+                _gpuEngine = null;
+                _useGpu = false;
+            }
+        }
+
+        /// <summary>
+        /// Perform weak measurement via entanglement.
+        /// Observer subsystem correlates with target without full collapse.
+        /// 
+        /// PHYSICS:
+        /// In relational quantum mechanics, measurement is an interaction
+        /// that creates correlation between observer and system.
+        /// The "result" is encoded in the relative phase between subsystems.
+        /// </summary>
+        /// <param name="targetNodeId">Node to measure</param>
+        /// <returns>True if measurement interaction occurred</returns>
+        public bool MeasureObservableInternal(int targetNodeId)
+        {
+            if (targetNodeId < 0 || targetNodeId >= _graph.N)
+                return false;
+
+            // Skip if target is part of observer (self-measurement)
+            if (_observerNodes.Contains(targetNodeId))
+                return false;
+
+            bool anyMeasurement = false;
+
+            foreach (int observerNode in _observerNodes)
+            {
+                // Check if observer is connected to target
+                if (!_graph.Edges[observerNode, targetNodeId])
+                    continue;
+
+                // Stronger connection = stronger measurement
+                double connectionWeight = _graph.Weights[observerNode, targetNodeId];
+                if (connectionWeight < MinMeasurementCorrelation)
+                    continue;
+
+                // Create entanglement via controlled phase shift
+                double phaseShift = ApplyControlledPhase(targetNodeId, observerNode, connectionWeight);
+
+                // Record observation (locally, not externally)
+                _observations.Add(new ObservationRecord
+                {
+                    ObserverNode = observerNode,
+                    TargetNode = targetNodeId,
+                    CorrelatedPhase = phaseShift,
+                    ConnectionWeight = connectionWeight,
+                    Timestamp = DateTime.UtcNow
+                });
+
+                anyMeasurement = true;
+            }
+
+            return anyMeasurement;
+        }
+
+        /// <summary>
+        /// Apply controlled phase gate between observer and target.
+        /// This creates entanglement without full collapse.
+        /// </summary>
+        private double ApplyControlledPhase(int control, int target, double weight)
+        {
+            // Get control node phase (what we're measuring)
+            double controlPhase = _graph.GetNodePhase(control);
+
+            // Phase shift is proportional to coupling and control phase
+            double phaseShift = MeasurementCoupling * weight * controlPhase;
+
+            // Apply phase shift to target (observer node)
+            _graph.ShiftNodePhase(target, phaseShift);
+
+            return phaseShift;
+        }
+
+        /// <summary>
+        /// Perform measurement sweep over a set of target nodes.
+        /// Uses GPU if available for large graphs.
+        /// </summary>
+        public int MeasureSweep(IEnumerable<int>? targetNodes = null)
+        {
+            // Use GPU for large graphs
+            if (_useGpu && _gpuEngine != null && _graph.N > 1000)
+            {
+                return MeasureSweepGpu(targetNodes);
+            }
+            
+            // CPU fallback
+            return MeasureSweepCpu(targetNodes);
+        }
+        
+        private int MeasureSweepGpu(IEnumerable<int>? targetNodes)
+        {
+            _gpuEngine!.MeasurementCoupling = MeasurementCoupling;
+            _gpuEngine.MinCorrelation = MinMeasurementCorrelation;
+            _gpuEngine.UploadWavefunction(_graph);
+            
+            int count = _gpuEngine.MeasureSweepGpu(_graph, targetNodes);
+            
+            _gpuEngine.DownloadWavefunction(_graph);
+            
+            // Copy observation records from GPU engine
+            foreach (var obs in _gpuEngine.Observations)
+            {
+                // Note: GPU ObservationRecord is a class, CPU is a struct
+                _observations.Add(new ObservationRecord
+                {
+                    ObserverNode = obs.ObserverNode,
+                    TargetNode = obs.TargetNode,
+                    CorrelatedPhase = obs.CorrelatedPhase,
+                    ConnectionWeight = obs.ConnectionWeight,
+                    Timestamp = obs.Timestamp
+                });
+            }
+            
+            return count;
+        }
+        
+        private int MeasureSweepCpu(IEnumerable<int>? targetNodes)
+        {
+            int count = 0;
+
+            if (targetNodes == null)
+            {
+                // Measure all non-observer nodes
+                for (int i = 0; i < _graph.N; i++)
+                {
+                    if (_observerNodes.Contains(i)) continue;
+                    if (MeasureObservableInternal(i)) count++;
+                }
+            }
+            else
+            {
+                foreach (int node in targetNodes)
+                {
+                    if (MeasureObservableInternal(node)) count++;
+                }
+            }
+
+            return count;
+        }
+
+        /// <summary>
+        /// Extract measurement statistics from observer's internal state.
+        /// This is still "internal" - reading the observer's wavefunction,
+        /// not the original system.
+        /// </summary>
+        /// <returns>Average magnitude of observer wavefunction</returns>
+        public double GetObserverExpectationValue()
+        {
+            double sum = 0.0;
+            int count = 0;
+
+            foreach (int node in _observerNodes)
+            {
+                Complex psi = _graph.GetNodeWavefunction(node);
+                sum += psi.Magnitude;
+                count++;
+            }
+
+            return count > 0 ? sum / count : 0.0;
+        }
+
+        /// <summary>
+        /// Get total accumulated phase in observer subsystem.
+        /// This encodes the "measurement record" relationally.
+        /// </summary>
+        public double GetObserverTotalPhase()
+        {
+            double totalPhase = 0.0;
+
+            foreach (int node in _observerNodes)
+            {
+                totalPhase += _graph.GetNodePhase(node);
+            }
+
+            return totalPhase;
+        }
+
+        /// <summary>
+        /// Get correlation between observer and a target region.
+        /// Higher correlation = more information extracted.
+        /// </summary>
+        /// <param name="targetNodes">Target region nodes</param>
+        /// <returns>Correlation coefficient [-1, 1]</returns>
+        public double GetCorrelationWithRegion(IEnumerable<int> targetNodes)
+        {
+            ArgumentNullException.ThrowIfNull(targetNodes);
+            
+            // Use GPU for large graphs
+            if (_useGpu && _gpuEngine != null && _graph.N > 1000)
+            {
+                _gpuEngine.UploadWavefunction(_graph);
+                return _gpuEngine.GetCorrelationWithRegion(_graph, targetNodes);
+            }
+
+            // CPU implementation
+            double observerMean = 0.0;
+            int observerCount = 0;
+            foreach (int node in _observerNodes)
+            {
+                observerMean += _graph.GetNodePhase(node);
+                observerCount++;
+            }
+            if (observerCount == 0) return 0.0;
+            observerMean /= observerCount;
+
+            double targetMean = 0.0;
+            int targetCount = 0;
+            foreach (int node in targetNodes)
+            {
+                if (node < 0 || node >= _graph.N) continue;
+                targetMean += _graph.GetNodePhase(node);
+                targetCount++;
+            }
+            if (targetCount == 0) return 0.0;
+            targetMean /= targetCount;
+
+            double covariance = 0.0;
+            double observerVar = 0.0;
+            double targetVar = 0.0;
+
+            foreach (int obs in _observerNodes)
+            {
+                double obsPhase = _graph.GetNodePhase(obs) - observerMean;
+                observerVar += obsPhase * obsPhase;
+
+                foreach (int tgt in targetNodes)
+                {
+                    if (tgt < 0 || tgt >= _graph.N) continue;
+                    if (!_graph.Edges[obs, tgt]) continue;
+
+                    double tgtPhase = _graph.GetNodePhase(tgt) - targetMean;
+                    covariance += obsPhase * tgtPhase;
+                }
+            }
+
+            foreach (int tgt in targetNodes)
+            {
+                if (tgt < 0 || tgt >= _graph.N) continue;
+                double tgtPhase = _graph.GetNodePhase(tgt) - targetMean;
+                targetVar += tgtPhase * tgtPhase;
+            }
+
+            double denominator = Math.Sqrt(observerVar * targetVar);
+            if (denominator < 1e-12) return 0.0;
+
+            return covariance / denominator;
+        }
+
+        /// <summary>
+        /// Compute mutual information between observer and target.
+        /// I(O;T) = S(O) + S(T) - S(O,T)
+        /// </summary>
+        /// <param name="targetNodes">Target region nodes</param>
+        /// <returns>Mutual information in bits</returns>
+        public double GetMutualInformation(IEnumerable<int> targetNodes)
+        {
+            ArgumentNullException.ThrowIfNull(targetNodes);
+            
+            // Use GPU for large graphs
+            if (_useGpu && _gpuEngine != null && _graph.N > 1000)
+            {
+                _gpuEngine.UploadWavefunction(_graph);
+                return _gpuEngine.ComputeMutualInformationGpu();
+            }
+
+            // CPU implementation
+            double observerEntropy = ComputePhaseEntropy(_observerNodes);
+
+            var targetSet = new HashSet<int>();
+            foreach (int n in targetNodes)
+            {
+                if (n >= 0 && n < _graph.N)
+                    targetSet.Add(n);
+            }
+            if (targetSet.Count == 0) return 0.0;
+
+            double targetEntropy = ComputePhaseEntropy(targetSet);
+
+            var jointSet = new HashSet<int>(_observerNodes);
+            foreach (int n in targetSet) jointSet.Add(n);
+            double jointEntropy = ComputePhaseEntropy(jointSet);
+
+            double mutualInfo = observerEntropy + targetEntropy - jointEntropy;
+
+            return Math.Max(0.0, mutualInfo);
+        }
+
+        private double ComputePhaseEntropy(IEnumerable<int> nodes)
+        {
+            const int numBins = 16;
+            int[] bins = new int[numBins];
+            int total = 0;
+
+            foreach (int node in nodes)
+            {
+                double phase = _graph.GetNodePhase(node);
+                double normalizedPhase = (phase % (2.0 * Math.PI) + 2.0 * Math.PI) % (2.0 * Math.PI);
+                int bin = (int)(normalizedPhase / (2.0 * Math.PI) * numBins);
+                if (bin >= numBins) bin = numBins - 1;
+                bins[bin]++;
+                total++;
+            }
+
+            if (total == 0) return 0.0;
+
+            double entropy = 0.0;
+            for (int i = 0; i < numBins; i++)
+            {
+                if (bins[i] == 0) continue;
+                double p = (double)bins[i] / total;
+                entropy -= p * Math.Log2(p);
+            }
+
+            return entropy;
+        }
+
+        /// <summary>
+        /// Clear all observation records.
+        /// </summary>
+        public void ClearObservations()
+        {
+            _observations.Clear();
+        }
+
+        /// <summary>
+        /// Get statistics about observations made so far.
+        /// </summary>
+        public ObservationStatistics GetStatistics()
+        {
+            if (_observations.Count == 0)
+            {
+                return new ObservationStatistics
+                {
+                    TotalObservations = 0,
+                    UniqueTargetsObserved = 0,
+                    AveragePhaseShift = 0.0,
+                    MaxPhaseShift = 0.0,
+                    AverageConnectionWeight = 0.0
+                };
+            }
+
+            var uniqueTargets = new HashSet<int>();
+            double sumPhase = 0.0;
+            double maxPhase = 0.0;
+            double sumWeight = 0.0;
+
+            foreach (var obs in _observations)
+            {
+                uniqueTargets.Add(obs.TargetNode);
+                sumPhase += Math.Abs(obs.CorrelatedPhase);
+                if (Math.Abs(obs.CorrelatedPhase) > maxPhase)
+                    maxPhase = Math.Abs(obs.CorrelatedPhase);
+                sumWeight += obs.ConnectionWeight;
+            }
+
+            return new ObservationStatistics
+            {
+                TotalObservations = _observations.Count,
+                UniqueTargetsObserved = uniqueTargets.Count,
+                AveragePhaseShift = sumPhase / _observations.Count,
+                MaxPhaseShift = maxPhase,
+                AverageConnectionWeight = sumWeight / _observations.Count
+            };
+        }
+    }
+
+    /// <summary>
+    /// Record of a single internal observation event.
+    /// </summary>
+    public readonly struct ObservationRecord
+    {
+        /// <summary>
+        /// Node in the observer subsystem that performed measurement.
+        /// </summary>
+        public int ObserverNode { get; init; }
+
+        /// <summary>
+        /// Node that was measured.
+        /// </summary>
+        public int TargetNode { get; init; }
+
+        /// <summary>
+        /// Phase shift applied to observer due to measurement.
+        /// Encodes the "result" of measurement.
+        /// </summary>
+        public double CorrelatedPhase { get; init; }
+
+        /// <summary>
+        /// Weight of edge connecting observer and target.
+        /// </summary>
+        public double ConnectionWeight { get; init; }
+
+        /// <summary>
+        /// When this observation occurred.
+        /// </summary>
+        public DateTime Timestamp { get; init; }
+    }
+
+    /// <summary>
+    /// Summary statistics of observations.
+    /// </summary>
+    public readonly struct ObservationStatistics
+    {
+        public int TotalObservations { get; init; }
+        public int UniqueTargetsObserved { get; init; }
+        public double AveragePhaseShift { get; init; }
+        public double MaxPhaseShift { get; init; }
+        public double AverageConnectionWeight { get; init; }
+    }
+}

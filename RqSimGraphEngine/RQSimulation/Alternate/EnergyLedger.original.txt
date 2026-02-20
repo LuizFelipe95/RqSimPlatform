@@ -1,0 +1,338 @@
+// Original backup before Wheeler-DeWitt Constraint implementation (Stage 2)
+// Backup date: Stage 2 of modernization plan
+
+using System;
+
+namespace RQSimulation
+{
+    /// <summary>
+    /// Tracks energy conservation across all simulation operations
+    /// Ensures strict adherence to energy conservation laws
+    /// Implements RQ-hypothesis checklist item 4: Unified Hamiltonian and Energy Ledger
+    /// 
+    /// Energy accounting:
+    /// - VacuumPool: Available vacuum energy for topology changes
+    /// - MatterEnergy: Energy in particle clusters
+    /// - FieldEnergy: Energy in gauge fields
+    /// - Total = VacuumPool + MatterEnergy + FieldEnergy (conserved)
+    /// </summary>
+    public class EnergyLedger
+    {
+        private double _totalEnergy;
+        private double _externalInjection;
+        private double _vacuumBorrowing;
+        private double _vacuumPool;
+        private double _matterEnergy;
+        private double _fieldEnergy;
+        private const double Tolerance = 1e-6;
+        private bool _initialized;
+
+        public double VacuumPool 
+        { 
+            get => _vacuumPool;
+            private set => _vacuumPool = value;
+        }
+        
+        public double MatterEnergy => _matterEnergy;
+        public double FieldEnergy => _fieldEnergy;
+
+        public void Initialize(double initialEnergy)
+        {
+            _totalEnergy = initialEnergy;
+            _externalInjection = 0;
+            _vacuumBorrowing = 0;
+            double computedPool = initialEnergy * PhysicsConstants.InitialVacuumPoolFraction;
+            _vacuumPool = Math.Max(computedPool, PhysicsConstants.InitialVacuumEnergy);
+            _matterEnergy = 0;
+            _fieldEnergy = 0;
+            _initialized = true;
+        }
+
+        public void Initialize(double vacuumEnergy, double matterEnergy, double fieldEnergy)
+        {
+            _vacuumPool = Math.Max(vacuumEnergy, PhysicsConstants.InitialVacuumEnergy);
+            _matterEnergy = matterEnergy;
+            _fieldEnergy = fieldEnergy;
+            _totalEnergy = _vacuumPool + matterEnergy + fieldEnergy;
+            _externalInjection = 0;
+            _vacuumBorrowing = 0;
+            _initialized = true;
+        }
+
+        public bool TrySpendVacuumEnergy(double amount)
+        {
+            if (!_initialized)
+            {
+                throw new InvalidOperationException("EnergyLedger not initialized. Call Initialize() first.");
+            }
+            
+            if (amount < 0)
+            {
+                throw new ArgumentException("Cannot spend negative energy", nameof(amount));
+            }
+
+            if (_vacuumPool >= amount)
+            {
+                _vacuumPool -= amount;
+                return true;
+            }
+            return false;
+        }
+
+        public bool TryAbsorbDeficit(double delta, RQGraph graph)
+        {
+            if (!_initialized) return false;
+
+            if (delta > 0)
+            {
+                _vacuumPool += delta;
+                return true;
+            }
+            else
+            {
+                double needed = -delta;
+                if (_vacuumPool >= needed)
+                {
+                    _vacuumPool -= needed;
+                    return true;
+                }
+                else
+                {
+                    return false;
+                }
+            }
+        }
+
+        public void RegisterRadiation(double amount)
+        {
+            if (!_initialized)
+            {
+                throw new InvalidOperationException("EnergyLedger not initialized. Call Initialize() first.");
+            }
+            
+            if (amount < 0)
+            {
+                throw new ArgumentException("Cannot register negative radiation", nameof(amount));
+            }
+            
+            _vacuumPool += amount;
+        }
+        
+        public bool CanAfford(double deltaEnergy)
+        {
+            if (!_initialized)
+            {
+                throw new InvalidOperationException("EnergyLedger not initialized. Call Initialize() first.");
+            }
+            
+            if (deltaEnergy <= 0)
+                return true;
+                
+            return _vacuumPool >= deltaEnergy;
+        }
+        
+        public void UpdateMatterEnergy(double newMatterEnergy)
+        {
+            if (!_initialized)
+            {
+                throw new InvalidOperationException("EnergyLedger not initialized. Call Initialize() first.");
+            }
+            
+            double delta = newMatterEnergy - _matterEnergy;
+            _matterEnergy = newMatterEnergy;
+            _vacuumPool -= delta;
+        }
+        
+        public void UpdateFieldEnergy(double newFieldEnergy)
+        {
+            if (!_initialized)
+            {
+                throw new InvalidOperationException("EnergyLedger not initialized. Call Initialize() first.");
+            }
+            
+            double delta = newFieldEnergy - _fieldEnergy;
+            _fieldEnergy = newFieldEnergy;
+            _vacuumPool -= delta;
+        }
+        
+        public double TotalTrackedEnergy => _vacuumPool + _matterEnergy + _fieldEnergy;
+
+        public void RecordExternalInjection(double energy, string source)
+        {
+            if (!_initialized)
+            {
+                throw new InvalidOperationException("EnergyLedger not initialized. Call Initialize() first.");
+            }
+
+            _externalInjection += energy;
+            _vacuumPool += energy;
+        }
+
+        public void BorrowFromVacuum(double energy)
+        {
+            if (!_initialized)
+            {
+                throw new InvalidOperationException("EnergyLedger not initialized.");
+            }
+
+            _vacuumBorrowing += energy;
+        }
+
+        public void RepayToVacuum(double energy)
+        {
+            if (!_initialized)
+            {
+                throw new InvalidOperationException("EnergyLedger not initialized.");
+            }
+
+            _vacuumBorrowing -= energy;
+            if (_vacuumBorrowing < -1e-10)
+            {
+                throw new InvalidOperationException(
+                    $"Vacuum debt cannot be negative: {_vacuumBorrowing:F10}. " +
+                    "More energy repaid than borrowed.");
+            }
+        }
+
+        public void ValidateConservation(double currentEnergy)
+        {
+            if (!_initialized)
+            {
+                throw new InvalidOperationException("EnergyLedger not initialized.");
+            }
+
+            double expected = _totalEnergy + _externalInjection;
+            double error = Math.Abs(currentEnergy - expected);
+            double relativeError = Math.Abs(expected) > 1e-10 
+                ? error / Math.Abs(expected) 
+                : error;
+
+            if (error > Tolerance && relativeError > Tolerance)
+            {
+                throw new EnergyConservationException(
+                    $"Energy conservation violated!\n" +
+                    $"Expected: {expected:F8}\n" +
+                    $"Current:  {currentEnergy:F8}\n" +
+                    $"Error:    {error:F8} ({relativeError * 100:F2}%)\n" +
+                    $"Injected: {_externalInjection:F8}\n" +
+                    $"Vacuum:   {_vacuumBorrowing:F8}");
+            }
+
+            _totalEnergy = currentEnergy;
+        }
+
+        public double VacuumDebt => _vacuumBorrowing;
+        public double TotalExternalInjection => _externalInjection;
+        public double TrackedEnergy => _totalEnergy;
+
+        public void ResetExternalInjection()
+        {
+            _externalInjection = 0;
+        }
+
+        public bool TryTransactVacuumEnergy(double amount)
+        {
+            if (!_initialized)
+            {
+                throw new InvalidOperationException("EnergyLedger not initialized. Call Initialize() first.");
+            }
+
+            if (amount > 0)
+            {
+                if (_vacuumPool >= amount)
+                {
+                    _vacuumPool -= amount;
+                    return true;
+                }
+                return false;
+            }
+            else
+            {
+                _vacuumPool -= amount;
+                return true;
+            }
+        }
+        
+        public double Temperature { get; set; } = 1.0;
+        
+        public double TaxRandomEvent(double entropyBits)
+        {
+            if (!_initialized)
+            {
+                throw new InvalidOperationException("EnergyLedger not initialized. Call Initialize() first.");
+            }
+            
+            if (entropyBits <= 0)
+                return 0.0;
+            
+            double energyCost = entropyBits * PhysicsConstants.LandauerLimit * Temperature;
+            _vacuumPool -= energyCost;
+            
+            if (_vacuumPool < 0)
+            {
+                throw new CausalityViolationException(
+                    $"Vacuum energy depleted! Cannot sustain entropy generation.\n" +
+                    $"Entropy requested: {entropyBits:F2} bits\n" +
+                    $"Energy cost: {energyCost:F6}\n" +
+                    $"Vacuum pool: {_vacuumPool + energyCost:F6} (before)\n" +
+                    $"This indicates the simulation has reached thermal death or requires energy injection.");
+            }
+            
+            return energyCost;
+        }
+        
+        public bool TryTaxRandomEvent(double entropyBits, out double energyCost)
+        {
+            if (!_initialized)
+            {
+                energyCost = 0.0;
+                return false;
+            }
+            
+            if (entropyBits <= 0)
+            {
+                energyCost = 0.0;
+                return true;
+            }
+            
+            energyCost = entropyBits * PhysicsConstants.LandauerLimit * Temperature;
+            
+            if (_vacuumPool >= energyCost)
+            {
+                _vacuumPool -= energyCost;
+                return true;
+            }
+            
+            energyCost = 0.0;
+            return false;
+        }
+        
+        public double MaxAvailableEntropy => 
+            _vacuumPool / (PhysicsConstants.LandauerLimit * Temperature + 1e-10);
+        
+        public void ConvertTopologyToMatter(double energy)
+        {
+            if (!_initialized)
+            {
+                throw new InvalidOperationException("EnergyLedger not initialized. Call Initialize() first.");
+            }
+            
+            if (energy < 0)
+            {
+                throw new ArgumentException("Cannot convert negative energy", nameof(energy));
+            }
+            
+            _matterEnergy += energy;
+        }
+    }
+    
+    public class EnergyConservationException : Exception
+    {
+        public EnergyConservationException(string message) : base(message) { }
+    }
+    
+    public class CausalityViolationException : Exception
+    {
+        public CausalityViolationException(string message) : base(message) { }
+    }
+}

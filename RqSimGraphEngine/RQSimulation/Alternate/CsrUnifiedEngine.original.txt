@@ -1,0 +1,73 @@
+// BACKUP: Original CsrUnifiedEngine.cs before RQG-HYPOTHESIS migration
+// Date: Migration to Waveform Evolution paradigm
+// Changes: Added Lapse buffers, Hamiltonian violation tracking, removed Random dependency for physics
+
+using System;
+using System.Linq;
+using ComputeSharp;
+using RQSimulation.GPUCompressedSparseRow.Data;
+using RQSimulation.GPUCompressedSparseRow.Observer;
+using RQSimulation.GPUCompressedSparseRow.Solvers;
+
+namespace RQSimulation.GPUCompressedSparseRow.Unified;
+
+/// <summary>
+/// Unified CSR engine for all GPU operations on large sparse graphs.
+/// 
+/// RQ-HYPOTHESIS STAGE 6: CSR UNIFIED ENGINE
+/// =========================================
+/// Combines all GPU physics operations with shared CSR topology:
+/// - Wheeler-DeWitt constraint computation
+/// - Spectral action computation
+/// - Quantum edge evolution
+/// - MCMC sampling
+/// - Internal observer measurements
+/// 
+/// BENEFITS:
+/// - Single topology upload for all operations
+/// - Coordinated physics step for consistency
+/// - Memory efficient for sparse graphs (O(E) vs O(N?))
+/// - Optimal for N > 10? nodes
+/// 
+/// USAGE:
+/// 1. Initialize with graph
+/// 2. Call PhysicsStepGpu() for coordinated evolution
+/// 3. Or call individual methods for specific operations
+/// 
+/// All computations use double precision (64-bit).
+/// </summary>
+public sealed class CsrUnifiedEngine : IDisposable
+{
+    private readonly GraphicsDevice _device;
+    private readonly Random _rng;
+    
+    // Shared CSR Topology
+    private CsrTopology? _topology;
+    
+    // GPU Buffers - Shared state
+    private ReadWriteBuffer<double>? _massesBuffer;
+    private ReadWriteBuffer<double>? _curvaturesBuffer;
+    private ReadWriteBuffer<double>? _violationsBuffer;
+    private ReadWriteBuffer<double>? _nodeActionsBuffer;
+    private ReadWriteBuffer<double>? _volumeContribsBuffer;
+    private ReadWriteBuffer<double>? _weylContribsBuffer;
+    private ReadWriteBuffer<double>? _reductionBuffer;
+    
+    // GPU Buffers - Quantum edges
+    private ReadWriteBuffer<Double2>? _edgeAmplitudesBuffer;
+    private ReadOnlyBuffer<double>? _edgeHamiltoniansBuffer;
+    private ReadOnlyBuffer<double>? _randomValuesBuffer;
+    
+    // CPU Arrays
+    private double[] _massesCpu = [];
+    private double[] _curvaturesCpu = [];
+    private double[] _violationsCpu = [];
+    private double[] _nodeActionsCpu = [];
+    private double[] _volumeContribsCpu = [];
+    private double[] _weylContribsCpu = [];
+    private Double2[] _edgeAmplitudesCpu = [];
+    private double[] _edgeHamiltoniansCpu = [];
+    private double[] _randomValuesCpu = [];
+    
+    // ... (rest of original implementation)
+}

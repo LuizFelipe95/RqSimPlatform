@@ -1,0 +1,192 @@
+// ============================================================
+// ConservationShaders.cs - ORIGINAL VERSION (pre-audit)
+// Archived: Hard Science Mode Audit Fixes
+// ============================================================
+
+using ComputeSharp;
+
+namespace RQSimulation.GPUCompressedSparseRow.DynamicTopology;
+
+/// <summary>
+/// CONSERVATION SHADERS FOR DYNAMIC TOPOLOGY
+/// ==========================================
+/// 
+/// When edges are deleted during topology evolution, their physical content
+/// (metric energy, gauge flux, etc.) must be conserved by transferring to nodes.
+/// 
+/// Pipeline integration:
+/// 1. MARK: Identify edges to delete (weight &lt; threshold)
+/// 2. CONSERVE: Transfer dying edge content to endpoint nodes
+/// 3. SWEEP: Remove marked edges via stream compaction
+/// 
+/// Physical principles (RQ-Hypothesis):
+/// - Metric energy ? Node mass: E_edge = f(weight) ? m_A += E/2, m_B += E/2
+/// - Gauge flux ? Node spin/charge: ?_edge ? spin_A += ?, spin_B -= ? (conservation)
+/// - Total energy before = Total energy after (validated in Science mode)
+/// 
+/// NOTE: Current implementation uses CPU for conservation to avoid
+/// atomic operation complexities with double precision. GPU version
+/// can be implemented using int atomics with fixed-point representation
+/// when performance becomes critical.
+/// </summary>
+
+/// <summary>
+/// GPU Kernel: Count dying edges for statistics.
+/// Lightweight kernel that counts edges marked for deletion.
+/// </summary>
+[GeneratedComputeShaderDescriptor]
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+public readonly partial struct CountDyingEdgesKernel_Original : IComputeShader
+{
+    /// <summary>Deletion flags for current frame (1 = marked for deletion).</summary>
+    public readonly ReadOnlyBuffer<int> DeletionFlags;
+    
+    /// <summary>Existence flags from previous frame (1 = existed).</summary>
+    public readonly ReadOnlyBuffer<int> PreviousExistence;
+    
+    /// <summary>Output: count of dying edges (atomic add).</summary>
+    public readonly ReadWriteBuffer<int> DyingCount;
+    
+    /// <summary>Number of edges.</summary>
+    public readonly int EdgeCount;
+
+    public CountDyingEdgesKernel_Original(
+        ReadOnlyBuffer<int> deletionFlags,
+        ReadOnlyBuffer<int> previousExistence,
+        ReadWriteBuffer<int> dyingCount,
+        int edgeCount)
+    {
+        DeletionFlags = deletionFlags;
+        PreviousExistence = previousExistence;
+        DyingCount = dyingCount;
+        EdgeCount = edgeCount;
+    }
+
+    public void Execute()
+    {
+        int edgeIndex = ThreadIds.X;
+        if (edgeIndex >= EdgeCount) return;
+
+        // Dying = marked for deletion AND existed in previous frame
+        if (DeletionFlags[edgeIndex] == 1 && PreviousExistence[edgeIndex] == 1)
+        {
+            Hlsl.InterlockedAdd(ref DyingCount[0], 1);
+        }
+    }
+}
+
+/// <summary>
+/// GPU Kernel: Sum edge weights for dying edges.
+/// Uses fixed-point arithmetic for atomic operations.
+/// </summary>
+[GeneratedComputeShaderDescriptor]
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+public readonly partial struct SumDyingEdgeWeightsKernel_Original : IComputeShader
+{
+    /// <summary>Edge weights (integer representation: weight * SCALE).</summary>
+    public readonly ReadOnlyBuffer<int> EdgeWeightsScaled;
+    
+    /// <summary>Deletion flags for current frame.</summary>
+    public readonly ReadOnlyBuffer<int> DeletionFlags;
+    
+    /// <summary>Existence flags from previous frame.</summary>
+    public readonly ReadOnlyBuffer<int> PreviousExistence;
+    
+    /// <summary>Output: sum of dying edge weights (scaled).</summary>
+    public readonly ReadWriteBuffer<int> TotalWeightScaled;
+    
+    /// <summary>Number of edges.</summary>
+    public readonly int EdgeCount;
+
+    public SumDyingEdgeWeightsKernel_Original(
+        ReadOnlyBuffer<int> edgeWeightsScaled,
+        ReadOnlyBuffer<int> deletionFlags,
+        ReadOnlyBuffer<int> previousExistence,
+        ReadWriteBuffer<int> totalWeightScaled,
+        int edgeCount)
+    {
+        EdgeWeightsScaled = edgeWeightsScaled;
+        DeletionFlags = deletionFlags;
+        PreviousExistence = previousExistence;
+        TotalWeightScaled = totalWeightScaled;
+        EdgeCount = edgeCount;
+    }
+
+    public void Execute()
+    {
+        int edgeIndex = ThreadIds.X;
+        if (edgeIndex >= EdgeCount) return;
+
+        // Only sum dying edges
+        if (DeletionFlags[edgeIndex] == 1 && PreviousExistence[edgeIndex] == 1)
+        {
+            int weightScaled = EdgeWeightsScaled[edgeIndex];
+            Hlsl.InterlockedAdd(ref TotalWeightScaled[0], weightScaled);
+        }
+    }
+}
+
+/// <summary>
+/// Initialize existence flags from weights.
+/// Used to track which edges existed before the MARK phase.
+/// </summary>
+[GeneratedComputeShaderDescriptor]
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+public readonly partial struct InitExistenceFlagsFromWeightsKernel_Original : IComputeShader
+{
+    /// <summary>Edge weights (scaled to int).</summary>
+    public readonly ReadOnlyBuffer<int> EdgeWeightsScaled;
+    
+    /// <summary>Output: existence flags.</summary>
+    public readonly ReadWriteBuffer<int> ExistenceFlags;
+    
+    /// <summary>Minimum weight threshold (scaled).</summary>
+    public readonly int MinWeightScaled;
+    
+    /// <summary>Number of edges.</summary>
+    public readonly int EdgeCount;
+
+    public InitExistenceFlagsFromWeightsKernel_Original(
+        ReadOnlyBuffer<int> edgeWeightsScaled,
+        ReadWriteBuffer<int> existenceFlags,
+        int minWeightScaled,
+        int edgeCount)
+    {
+        EdgeWeightsScaled = edgeWeightsScaled;
+        ExistenceFlags = existenceFlags;
+        MinWeightScaled = minWeightScaled;
+        EdgeCount = edgeCount;
+    }
+
+    public void Execute()
+    {
+        int i = ThreadIds.X;
+        if (i >= EdgeCount) return;
+
+        ExistenceFlags[i] = EdgeWeightsScaled[i] >= MinWeightScaled ? 1 : 0;
+    }
+}
+
+/// <summary>
+/// Zero a single-element integer buffer.
+/// </summary>
+[GeneratedComputeShaderDescriptor]
+[ThreadGroupSize(DefaultThreadGroupSizes.X)]
+public readonly partial struct ZeroIntBufferKernel_Original : IComputeShader
+{
+    /// <summary>Buffer to zero.</summary>
+    public readonly ReadWriteBuffer<int> Buffer;
+
+    public ZeroIntBufferKernel_Original(ReadWriteBuffer<int> buffer)
+    {
+        Buffer = buffer;
+    }
+
+    public void Execute()
+    {
+        if (ThreadIds.X == 0)
+        {
+            Buffer[0] = 0;
+        }
+    }
+}

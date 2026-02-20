@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "RqSimUI": {
+      "commandName": "Project",
+      "nativeDebugging": true
+    }
+  }
+}

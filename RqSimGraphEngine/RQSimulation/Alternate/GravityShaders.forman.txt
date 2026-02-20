@@ -1,0 +1,28 @@
+// ============================================================
+// ORIGINAL GravityShaders.cs BEFORE OLLIVIER-RICCI REFACTORING  
+// Saved: Scientific Restoration Protocol - Step 10
+// ============================================================
+// This version uses Forman-Ricci curvature (scalar approximation).
+// The refactored version adds Ollivier-Ricci via Sinkhorn distance
+// for tensor curvature (spin-2 gravitational waves support).
+// ============================================================
+
+// Original FormanCurvatureShader:
+// Formula: Ric(e) = w_e * (?(w_e1*w_e2) for triangles - ?*(W_u + W_v))
+// where W_u = weighted degree of node u (excluding edge e)
+//
+// This is a SCALAR curvature - it cannot describe:
+// - Gravitational waves (spin-2)
+// - Tensor perturbations
+// - Full Riemann curvature
+
+// [ThreadGroupSize(64, 1, 1)]
+// public readonly partial struct FormanCurvatureShader : IComputeShader
+// {
+//     public void Execute()
+//     {
+//         // ... Forman formula based on triangles and degrees ...
+//         float penalty = degreePenaltyFactor * (w_u + w_v);
+//         curvatures[edgeIdx] = w_uv * (triangleTerm - penalty);
+//     }
+// }

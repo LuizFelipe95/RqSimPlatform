@@ -1,0 +1,103 @@
+// ============================================================
+// ORIGINAL GpuMCMCEngine.cs BEFORE GAUGE INVARIANCE REFACTORING
+// Saved: Scientific Restoration Protocol - Step 8
+// ============================================================
+// This version uses simple energy-based Metropolis criterion without
+// gauge symmetry checks. The refactored version adds Wilson Loop
+// flux check for gauge invariance (Noether theorem compliance).
+// ============================================================
+
+using System;
+using ComputeSharp;
+
+namespace RQSimulation.GPUOptimized.MCMC;
+
+/// <summary>
+/// GPU-accelerated MCMC engine for path integral quantum gravity.
+/// 
+/// RQ-HYPOTHESIS STAGE 4: MCMC SAMPLING
+/// ====================================
+/// Markov Chain Monte Carlo for sampling configurations from:
+///   Z = ? D[g] exp(-S_E[g])
+/// 
+/// PARALLELIZATION STRATEGY:
+/// ========================
+/// MCMC moves are inherently sequential, but we parallelize:
+/// 1. Euclidean action computation (sum over edges/nodes)
+/// 2. Batched proposal evaluation (compute ?S for many proposals)
+/// 3. Parallel Tempering (optional: K replicas at different T)
+/// 
+/// PHYSICAL CORRECTNESS:
+/// ====================
+/// - Detailed balance preserved by sequential move application
+/// - Batched proposals computed in parallel, but applied one-by-one
+/// - Action computation is embarrassingly parallel
+/// 
+/// All computations use double precision (64-bit).
+/// </summary>
+public sealed class GpuMCMCEngine : IDisposable
+{
+    // ... original implementation ...
+    
+    /// <summary>
+    /// Perform one Metropolis-Hastings step.
+    /// NOTE: This version does NOT check gauge invariance.
+    /// </summary>
+    private void DoMetropolisStep()
+    {
+        if (_edgeCount == 0) return;
+
+        // Select random edge to modify
+        int edgeIdx = _rng.Next(_edgeCount);
+        double currentWeight = _weightsCpu[edgeIdx];
+
+        // Propose new weight
+        double proposedWeight;
+        int moveType = _rng.Next(3);
+
+        if (_edgeExistsCpu[edgeIdx] == 0)
+        {
+            proposedWeight = _rng.NextDouble();
+        }
+        else if (moveType == 0)
+        {
+            proposedWeight = 0.0;
+        }
+        else
+        {
+            proposedWeight = currentWeight + (_rng.NextDouble() - 0.5) * WeightPerturbation;
+            proposedWeight = Math.Clamp(proposedWeight, 0.0, 1.0);
+            if (proposedWeight < MinWeight)
+            {
+                proposedWeight = 0.0;
+            }
+        }
+
+        // Compute ?S (local approximation for speed)
+        double deltaS = LinkCostCoeff * (currentWeight - proposedWeight);
+
+        // Metropolis criterion - NO GAUGE CHECK
+        bool accept = false;
+        if (deltaS <= 0.0)
+        {
+            accept = true;
+        }
+        else
+        {
+            double acceptProb = Math.Exp(-Beta * deltaS);
+            accept = _rng.NextDouble() < acceptProb;
+        }
+
+        if (accept)
+        {
+            _weightsCpu[edgeIdx] = proposedWeight;
+            _edgeExistsCpu[edgeIdx] = proposedWeight >= MinWeight ? 1 : 0;
+            _currentAction += deltaS;
+            _acceptedMoves++;
+        }
+        else
+        {
+            _rejectedMoves++;
+        }
+    }
+}
