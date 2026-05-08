@@ -34,7 +34,7 @@
 		<PackageReference Include="Vortice.Mathematics" Version="2.1.0" />
 
 		<!-- Existing (can be used by current code; keep for compatibility) -->
-		<PackageReference Include="Vortice.DirectX" Version="3.8.2" />
+		<PackageReference Include="Vortice.DirectX" Version="3.8.3" />
 
 		<!-- ComputeSharp for GPU compute interop with DX12 -->
 		<PackageReference Include="ComputeSharp" Version="3.2.0" />
